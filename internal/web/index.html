@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLM API 网关 · 管理控制台</title>
+  <link rel="stylesheet" href="/console/css/style.css" />
+</head>
+<body>
+  <!-- login -->
+  <section id="login-view" class="login-wrap hidden">
+    <form id="login-form" class="login-card">
+      <h1>LLM API 网关</h1>
+      <p class="sub">第三方模型聚合 · 额度路由控制台</p>
+      <label for="login-user">用户名</label>
+      <input id="login-user" autocomplete="username" required />
+      <label for="login-pass">密码</label>
+      <input id="login-pass" type="password" autocomplete="current-password" required />
+      <div id="login-error" class="error-text hidden"></div>
+      <button type="submit" class="btn primary block">登录</button>
+    </form>
+  </section>
+
+  <!-- app shell -->
+  <section id="main-view" class="hidden">
+    <aside class="sidebar">
+      <div class="brand">⚡ LLM 网关</div>
+      <nav>
+        <a href="#/dashboard" data-route="dashboard">仪表盘</a>
+        <a href="#/channels" data-route="channels">渠道管理</a>
+        <a href="#/quotas" data-route="quotas">额度管理</a>
+        <a href="#/models" data-route="models">模型路由</a>
+        <a href="#/users" data-route="users">用户 / 令牌</a>
+        <a href="#/logs" data-route="logs">调用日志</a>
+      </nav>
+      <div class="sidebar-foot">
+        <button id="logout-btn" class="btn ghost block">退出</button>
+      </div>
+    </aside>
+    <main class="content" id="view"></main>
+  </section>
+
+  <div id="modal-root"></div>
+
+  <script src="/console/js/app.js"></script>
+</body>
+</html>
