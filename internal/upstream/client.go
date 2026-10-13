@@ -49,6 +49,22 @@ func (c *Client) clientFor(d time.Duration) *http.Client {
 	return cl
 }
 
+// setAuth applies the channel's auth scheme to the request.
+func (c *Client) setAuth(req *http.Request, ch *domain.Channel, key string) {
+	switch ch.AuthType {
+	case domain.AuthTypeNone:
+		// no auth header
+	case domain.AuthTypeHeader:
+		name := ch.APIKeyHeader
+		if name == "" {
+			name = "x-api-key"
+		}
+		req.Header.Set(name, key)
+	default: // bearer
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+}
+
 // Do performs a POST to channel.BaseURL+endpoint with the given key.
 // The caller is responsible for closing resp.Body.
 func (c *Client) Do(ctx context.Context, ch *domain.Channel, key, endpoint string, body []byte) (*http.Response, error) {
@@ -63,18 +79,27 @@ func (c *Client) Do(ctx context.Context, ch *domain.Channel, key, endpoint strin
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	switch ch.AuthType {
-	case domain.AuthTypeNone:
-		// no auth header
-	case domain.AuthTypeHeader:
-		name := ch.APIKeyHeader
-		if name == "" {
-			name = "x-api-key"
-		}
-		req.Header.Set(name, key)
-	default: // bearer
-		req.Header.Set("Authorization", "Bearer "+key)
+	c.setAuth(req, ch, key)
+
+	resp, err := c.clientFor(c.timeoutFor(ch)).Do(req)
+	if err != nil {
+		return nil, err
 	}
+	return resp, nil
+}
+
+// Get performs a GET to channel.BaseURL+endpoint (e.g. /models) with the given
+// key. Used by light probes: validates connectivity and auth without inference.
+func (c *Client) Get(ctx context.Context, ch *domain.Channel, key, endpoint string) (*http.Response, error) {
+	base := strings.TrimRight(ch.BaseURL, "/")
+	if !strings.HasPrefix(endpoint, "/") {
+		endpoint = "/" + endpoint
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(req, ch, key)
 
 	resp, err := c.clientFor(c.timeoutFor(ch)).Do(req)
 	if err != nil {

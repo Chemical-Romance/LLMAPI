@@ -160,25 +160,49 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	excluded := map[string]bool{}
 	attempts := 0
 	var lastErrStr string
+	clientGone := false
 	start := time.Now()
 
 	for attempts < maxAttempts {
 		attempts++
 		tgt, _, err := g.engine.Pick(ctx, meta.Model, maxTokens, 1, int64(g.cfg.DefaultReserveTokens()), excluded)
 		if err != nil {
-			lastErrStr = err.Error()
+			// Keep the real upstream failure from earlier attempts; the final
+			// Pick error only says remaining candidates were already tried.
+			if lastErrStr == "" {
+				lastErrStr = err.Error()
+			}
 			break
 		}
 		err = g.tryChat(ctx, w, tok, meta, body, tgt)
 		if err == nil {
+			_ = g.st.SetQuotaStatus(context.WithoutCancel(ctx), tgt.QuotaID, domain.QuotaStatusOK, "")
 			return
 		}
-		// failover: refund reservation, exclude candidate and try the next one
-		lastErrStr = err.Error()
+		// refund reservation on every failure path
 		if rerr := g.st.Release(context.WithoutCancel(ctx), tgt.QuotaID, tgt.Reserved); rerr != nil {
 			log.Printf("[gateway] release failed: %v", rerr)
 		}
+		if ctx.Err() != nil {
+			// client disconnected mid-request; not a channel failure — do not
+			// mark the candidate unavailable and do not fail over.
+			clientGone = true
+			lastErrStr = "client disconnected"
+			break
+		}
+		// failover: mark unavailable and try the next candidate
+		_ = g.st.SetQuotaStatus(context.WithoutCancel(ctx), tgt.QuotaID, domain.QuotaStatusUnavailable, err.Error())
+		lastErrStr = err.Error()
 		excluded[tgt.Channel.ID.Hex()+"|"+tgt.ActualModel] = true
+	}
+	if clientGone {
+		g.logs.submit(&domain.RequestLog{
+			UserID: tok.UserID, TokenID: tok.ID, Endpoint: "/v1/chat/completions",
+			VirtualModel: meta.Model, Status: "error", Error: "client disconnected",
+			LatencyMs: time.Since(start).Milliseconds(), CreatedAt: time.Now().UTC(),
+		})
+		log.Printf("[chat] client disconnected %s model=%s", tok.Name, meta.Model)
+		return
 	}
 	if lastErrStr == "" {
 		lastErrStr = "all channels unavailable"
@@ -197,6 +221,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 // returns nil. A non-nil error means nothing was written to the client yet, so
 // the caller may safely fail over to another candidate.
 func (g *Gateway) tryChat(ctx context.Context, w http.ResponseWriter, tok *domain.Token, meta chatMeta, body []byte, tgt *route.Target) error {
+	start := time.Now()
 	reqBody, err := upstream.RewriteModel(body, tgt.ActualModel)
 	if err != nil {
 		return fmt.Errorf("bad request body: %v", err)
@@ -229,7 +254,9 @@ func (g *Gateway) tryChat(ctx context.Context, w http.ResponseWriter, tok *domai
 	usage := upstream.ParseChatUsage(out)
 	promptEst := upstream.EstimatePromptTokens(body)
 	actual, pt, ct, tt := g.settleChat(tgt, usage, promptEst, "")
-	g.settle(ctx, tgt, actual, tok, "/v1/chat/completions", meta.Model, tgt.ActualModel, pt, ct, tt, 0, "success", "", 0)
+	// WithoutCancel: settle even if the client disconnected after the upstream
+	// response arrived, so the reservation never leaks.
+	g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/chat/completions", meta.Model, tgt.ActualModel, pt, ct, tt, 0, "success", "", time.Since(start).Milliseconds())
 
 	copyHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
@@ -388,24 +415,49 @@ func (g *Gateway) handleImages(w http.ResponseWriter, r *http.Request) {
 	excluded := map[string]bool{}
 	attempts := 0
 	var lastErrStr string
+	clientGone := false
 	start := time.Now()
 
 	for attempts < maxAttempts {
 		attempts++
 		tgt, _, err := g.engine.Pick(ctx, meta.Model, 0, meta.N, int64(g.cfg.DefaultReserveTokens()), excluded)
 		if err != nil {
-			lastErrStr = err.Error()
+			// Keep the real upstream failure from earlier attempts; the final
+			// Pick error only says remaining candidates were already tried.
+			if lastErrStr == "" {
+				lastErrStr = err.Error()
+			}
 			break
 		}
 		err = g.tryImages(ctx, w, tok, body, meta, tgt)
 		if err == nil {
+			_ = g.st.SetQuotaStatus(context.WithoutCancel(ctx), tgt.QuotaID, domain.QuotaStatusOK, "")
 			return
 		}
-		lastErrStr = err.Error()
+		// refund reservation on every failure path
 		if rerr := g.st.Release(context.WithoutCancel(ctx), tgt.QuotaID, tgt.Reserved); rerr != nil {
 			log.Printf("[gateway] release failed: %v", rerr)
 		}
+		if ctx.Err() != nil {
+			// client disconnected mid-request; not a channel failure — do not
+			// mark the candidate unavailable and do not fail over.
+			clientGone = true
+			lastErrStr = "client disconnected"
+			break
+		}
+		// failover: mark unavailable and try the next candidate
+		_ = g.st.SetQuotaStatus(context.WithoutCancel(ctx), tgt.QuotaID, domain.QuotaStatusUnavailable, err.Error())
+		lastErrStr = err.Error()
 		excluded[tgt.Channel.ID.Hex()+"|"+tgt.ActualModel] = true
+	}
+	if clientGone {
+		g.logs.submit(&domain.RequestLog{
+			UserID: tok.UserID, TokenID: tok.ID, Endpoint: "/v1/images/generations",
+			VirtualModel: meta.Model, Status: "error", Error: "client disconnected",
+			LatencyMs: time.Since(start).Milliseconds(), CreatedAt: time.Now().UTC(),
+		})
+		log.Printf("[images] client disconnected %s model=%s", tok.Name, meta.Model)
+		return
 	}
 	if lastErrStr == "" {
 		lastErrStr = "all channels unavailable"
@@ -420,6 +472,7 @@ func (g *Gateway) handleImages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) tryImages(ctx context.Context, w http.ResponseWriter, tok *domain.Token, body []byte, meta imagesMeta, tgt *route.Target) error {
+	start := time.Now()
 	reqBody, err := upstream.RewriteModel(body, tgt.ActualModel)
 	if err != nil {
 		return fmt.Errorf("bad request body: %v", err)
@@ -452,7 +505,9 @@ func (g *Gateway) tryImages(ctx context.Context, w http.ResponseWriter, tok *dom
 	default:
 		actual = 0 // token mode not meaningful for images; reservation fully refunded
 	}
-	g.settle(ctx, tgt, actual, tok, "/v1/images/generations", meta.Model, tgt.ActualModel, 0, 0, 0, images, "success", "", 0)
+	// WithoutCancel: settle even if the client disconnected, so the
+	// reservation never leaks.
+	g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/images/generations", meta.Model, tgt.ActualModel, 0, 0, 0, images, "success", "", time.Since(start).Milliseconds())
 
 	copyHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Length", strconv.Itoa(len(out)))

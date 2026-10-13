@@ -78,7 +78,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]domain.User, error) {
 		return nil, err
 	}
 	defer cur.Close(ctx)
-	var out []domain.User
+	out := []domain.User{}
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
 	}
@@ -167,7 +167,7 @@ func (s *Store) ListTokens(ctx context.Context) ([]domain.Token, error) {
 		return nil, err
 	}
 	defer cur.Close(ctx)
-	var out []domain.Token
+	out := []domain.Token{}
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
 	}
@@ -179,7 +179,11 @@ func (s *Store) UpdateToken(ctx context.Context, id any, enabled bool, name stri
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.Tokens.UpdateOne(ctx, bson.M{"_id": oid}, bson.M{"$set": bson.M{"enabled": enabled, "name": name}})
+	set := bson.M{"enabled": enabled}
+	if name != "" {
+		set["name"] = name
+	}
+	_, err = s.DB.Tokens.UpdateOne(ctx, bson.M{"_id": oid}, bson.M{"$set": set})
 	return err
 }
 
@@ -233,7 +237,7 @@ func (s *Store) ListChannels(ctx context.Context) ([]domain.Channel, error) {
 		return nil, err
 	}
 	defer cur.Close(ctx)
-	var out []domain.Channel
+	out := []domain.Channel{}
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
 	}
@@ -297,7 +301,7 @@ func (s *Store) ListChannelKeys(ctx context.Context, channelID any) ([]domain.Ch
 		return nil, err
 	}
 	defer cur.Close(ctx)
-	var out []domain.ChannelKey
+	out := []domain.ChannelKey{}
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
 	}
@@ -312,7 +316,7 @@ func (s *Store) ListAllChannelKeys(ctx context.Context) ([]domain.ChannelKey, er
 		return nil, err
 	}
 	defer cur.Close(ctx)
-	var out []domain.ChannelKey
+	out := []domain.ChannelKey{}
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
 	}
@@ -361,12 +365,12 @@ func (s *Store) DeleteChannelKey(ctx context.Context, id any) error {
 // ---------- quotas ----------
 
 func (s *Store) ListQuotas(ctx context.Context, filter bson.M) ([]domain.Quota, error) {
-	cur, err := s.DB.Quotas.Find(ctx, filter, options.Find().SetSort(bson.M{"channelId": 1, "model": 1}))
+	cur, err := s.DB.Quotas.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "channelId", Value: 1}, {Key: "model", Value: 1}}))
 	if err != nil {
 		return nil, err
 	}
 	defer cur.Close(ctx)
-	var out []domain.Quota
+	out := []domain.Quota{}
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
 	}
@@ -411,13 +415,46 @@ func (s *Store) CreateQuota(ctx context.Context, q *domain.Quota) (*domain.Quota
 func (s *Store) UpdateQuota(ctx context.Context, q *domain.Quota) error {
 	q.UpdatedAt = now()
 	_, err := s.DB.Quotas.UpdateOne(ctx, bson.M{"_id": q.ID}, bson.M{"$set": bson.M{
-		"mode": q.Mode, "remaining": q.Remaining, "chargePerCall": q.ChargePerCall,
+		"channelId": q.ChannelID, "model": q.Model,
+		"mode": q.Mode, "type": q.Type, "remaining": q.Remaining, "chargePerCall": q.ChargePerCall,
 		"multiplier": q.Multiplier, "enabled": q.Enabled, "note": q.Note, "updatedAt": q.UpdatedAt,
 	}})
-	return err
+	if err != nil {
+		var we mongo.WriteException
+		if errors.As(err, &we) && len(we.WriteErrors) > 0 && we.WriteErrors[0].Code == 11000 {
+			return ErrNameConflict
+		}
+		return err
+	}
+	// Editing remaining above zero recovers an "insufficient" quota.
+	if q.Remaining > 0 {
+		_, _ = s.DB.Quotas.UpdateOne(ctx,
+			bson.M{"_id": q.ID, "status": domain.QuotaStatusInsufficient},
+			bson.M{"$set": bson.M{"status": domain.QuotaStatusOK, "statusReason": ""}})
+	}
+	return nil
 }
 
 // AdjustQuota adds delta to remaining (positive or negative) and returns the new value.
+// SetQuotaStatus records a quota's runtime health status (ok/insufficient/unavailable).
+func (s *Store) SetQuotaStatus(ctx context.Context, id any, status, reason string) error {
+	oid, err := objID(id)
+	if err != nil {
+		return err
+	}
+	if len(reason) > 300 {
+		reason = reason[:300]
+	}
+	set := bson.M{"status": status, "statusAt": now()}
+	if reason == "" {
+		set["statusReason"] = ""
+	} else {
+		set["statusReason"] = reason
+	}
+	_, err = s.DB.Quotas.UpdateOne(ctx, bson.M{"_id": oid}, bson.M{"$set": set})
+	return err
+}
+
 func (s *Store) AdjustQuota(ctx context.Context, id any, delta float64) (float64, error) {
 	oid, err := objID(id)
 	if err != nil {
@@ -435,6 +472,12 @@ func (s *Store) AdjustQuota(ctx context.Context, id any, delta float64) (float64
 	var q domain.Quota
 	if err := res.Decode(&q); err != nil {
 		return 0, err
+	}
+	// Topping up above zero recovers an "insufficient" quota.
+	if q.Remaining > 0 && q.Status == domain.QuotaStatusInsufficient {
+		_, _ = s.DB.Quotas.UpdateOne(ctx,
+			bson.M{"_id": oid},
+			bson.M{"$set": bson.M{"status": domain.QuotaStatusOK, "statusReason": ""}})
 	}
 	return q.Remaining, nil
 }
@@ -498,7 +541,7 @@ func (s *Store) ListVirtualModels(ctx context.Context) ([]domain.VirtualModel, e
 		return nil, err
 	}
 	defer cur.Close(ctx)
-	var out []domain.VirtualModel
+	out := []domain.VirtualModel{}
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
 	}
@@ -554,6 +597,28 @@ func (s *Store) UpdateVirtualModel(ctx context.Context, vm *domain.VirtualModel)
 	return err
 }
 
+// SaveSpeedTestRun persists the latest speed-test results on the virtual model.
+func (s *Store) SaveSpeedTestRun(ctx context.Context, id any, results []domain.ProbeResult) error {
+	oid, err := objID(id)
+	if err != nil {
+		return err
+	}
+	run := domain.ProbeRun{At: now(), Results: results}
+	_, err = s.DB.VirtualModels.UpdateOne(ctx, bson.M{"_id": oid}, bson.M{"$set": bson.M{"speedTest": run}})
+	return err
+}
+
+// SaveProbeRun persists the latest light-probe results on the virtual model.
+func (s *Store) SaveProbeRun(ctx context.Context, id any, results []domain.ProbeResult) error {
+	oid, err := objID(id)
+	if err != nil {
+		return err
+	}
+	run := domain.ProbeRun{At: now(), Results: results}
+	_, err = s.DB.VirtualModels.UpdateOne(ctx, bson.M{"_id": oid}, bson.M{"$set": bson.M{"probe": run}})
+	return err
+}
+
 func (s *Store) DeleteVirtualModel(ctx context.Context, id any) error {
 	oid, err := objID(id)
 	if err != nil {
@@ -602,7 +667,7 @@ func (s *Store) ListLogs(ctx context.Context, q LogQuery) ([]domain.RequestLog, 
 		return nil, err
 	}
 	defer cur.Close(ctx)
-	var out []domain.RequestLog
+	out := []domain.RequestLog{}
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
 	}

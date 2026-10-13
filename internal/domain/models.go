@@ -13,6 +13,13 @@ const (
 
 	ModeToken = "token" // quota counted in tokens, deducted by usage
 	ModeCalls = "calls" // quota counted in call count
+
+	ModelTypeText   = "text"   // 语言/文本
+	ModelTypeSpeech = "speech" // 语音
+	ModelTypeImage  = "image"  // 图片
+	ModelTypeVideo  = "video"  // 视频
+	ModelTypeEmbed  = "embed"  // 向量
+	ModelTypeOther  = "other"  // 其他
 )
 
 // User is a platform user (account that owns one or more API tokens).
@@ -64,22 +71,59 @@ type Quota struct {
 	ID            bson.ObjectID `bson:"_id,omitempty" json:"id"`
 	ChannelID     bson.ObjectID `bson:"channelId" json:"channelId"`
 	Model         string        `bson:"model" json:"model"`
+	Type          string        `bson:"type" json:"type"` // text | speech | image | video | embed | other
 	Mode          string        `bson:"mode" json:"mode"`
 	Remaining     float64       `bson:"remaining" json:"remaining"`         // remaining tokens or calls
 	Reserved      float64       `bson:"reserved" json:"reserved"`           // in-flight reserved amount (unbilled)
 	ChargePerCall float64       `bson:"chargePerCall" json:"chargePerCall"` // extra charge per call/image for ModeCalls (default 1)
 	Multiplier    float64       `bson:"multiplier" json:"multiplier"`       // consumption coefficient for ModeToken (default 1)
 	Enabled       bool          `bson:"enabled" json:"enabled"`
+	Status        string        `bson:"status,omitempty" json:"status,omitempty"`             // ok | insufficient | unavailable (routing only picks ok)
+	StatusReason  string        `bson:"statusReason,omitempty" json:"statusReason,omitempty"` // last failure reason
+	StatusAt      time.Time     `bson:"statusAt,omitempty" json:"statusAt,omitempty"`         // when status was last set
 	Note          string        `bson:"note,omitempty" json:"note"`
 	CreatedAt     time.Time     `bson:"createdAt" json:"createdAt"`
 	UpdatedAt     time.Time     `bson:"updatedAt" json:"updatedAt"`
 }
 
+// Quota runtime health status. Routing only picks "ok" quotas; "" is treated
+// as ok for records created before the status field existed.
+const (
+	QuotaStatusOK           = "ok"           // 正常
+	QuotaStatusInsufficient = "insufficient" // 额度不足
+	QuotaStatusUnavailable  = "unavailable"  // 不可用（上游失败）
+)
+
 // Candidate is one route entry: which channel+model to try, in priority order.
 type Candidate struct {
 	ChannelID bson.ObjectID `bson:"channelId" json:"channelId"`
 	Model     string        `bson:"model" json:"model"`
-	Priority  int           `bson:"priority" json:"priority"` // lower = tried first
+	Priority  int           `bson:"priority" json:"priority"`                   // lower = tried first
+	Enabled   *bool         `bson:"enabled,omitempty" json:"enabled,omitempty"` // nil = enabled (legacy records)
+}
+
+// IsEnabled reports whether the candidate may be routed to.
+func (c Candidate) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// ProbeResult is one candidate's speed-test / light-probe outcome.
+type ProbeResult struct {
+	ChannelID   string  `bson:"channelId" json:"channelId"`
+	ChannelName string  `bson:"channelName" json:"channelName,omitempty"`
+	Model       string  `bson:"model" json:"model"`
+	Priority    int     `bson:"priority" json:"priority"`
+	OK          bool    `bson:"ok" json:"ok"`
+	LatencyMs   int64   `bson:"latencyMs" json:"latencyMs"`
+	Tokens      int64   `bson:"tokens,omitempty" json:"tokens,omitempty"`
+	Charge      float64 `bson:"charge,omitempty" json:"charge,omitempty"`
+	Error       string  `bson:"error,omitempty" json:"error,omitempty"`
+}
+
+// ProbeRun is a persisted set of probe results with its timestamp.
+type ProbeRun struct {
+	At      time.Time     `bson:"at" json:"at"`
+	Results []ProbeResult `bson:"results" json:"results"`
 }
 
 // VirtualModel is the model name exposed to end users.
@@ -89,8 +133,12 @@ type VirtualModel struct {
 	Description string        `bson:"description,omitempty" json:"description"`
 	Candidates  []Candidate   `bson:"candidates" json:"candidates"`
 	Enabled     bool          `bson:"enabled" json:"enabled"`
-	CreatedAt   time.Time     `bson:"createdAt" json:"createdAt"`
-	UpdatedAt   time.Time     `bson:"updatedAt" json:"updatedAt"`
+	// LastSpeedTest / LastProbe persist the most recent speed test / light
+	// probe run so results survive page reloads.
+	LastSpeedTest *ProbeRun `bson:"speedTest,omitempty" json:"speedTest,omitempty"`
+	LastProbe     *ProbeRun `bson:"probe,omitempty" json:"probe,omitempty"`
+	CreatedAt     time.Time `bson:"createdAt" json:"createdAt"`
+	UpdatedAt     time.Time `bson:"updatedAt" json:"updatedAt"`
 }
 
 // RequestLog records every public API call.

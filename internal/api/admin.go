@@ -156,10 +156,11 @@ type Admin struct {
 	st      *store.Store
 	auth    *AdminAuth
 	limiter *loginLimiter
+	gw      *Gateway
 }
 
-func NewAdmin(st *store.Store, auth *AdminAuth) *Admin {
-	return &Admin{st: st, auth: auth, limiter: newLoginLimiter()}
+func NewAdmin(st *store.Store, auth *AdminAuth, gw *Gateway) *Admin {
+	return &Admin{st: st, auth: auth, limiter: newLoginLimiter(), gw: gw}
 }
 
 // Register wires the admin API under /api/admin.
@@ -186,11 +187,14 @@ func (a *Admin) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/admin/quotas/{id}", protect(a.handleUpdateQuota))
 	mux.HandleFunc("DELETE /api/admin/quotas/{id}", protect(a.handleDeleteQuota))
 	mux.HandleFunc("POST /api/admin/quotas/{id}/adjust", protect(a.handleAdjustQuota))
+	mux.HandleFunc("POST /api/admin/quotas/{id}/reset-status", protect(a.handleResetQuotaStatus))
 
 	mux.HandleFunc("GET /api/admin/virtual-models", protect(a.handleListVirtualModels))
 	mux.HandleFunc("POST /api/admin/virtual-models", protect(a.handleCreateVirtualModel))
 	mux.HandleFunc("PUT /api/admin/virtual-models/{id}", protect(a.handleUpdateVirtualModel))
 	mux.HandleFunc("DELETE /api/admin/virtual-models/{id}", protect(a.handleDeleteVirtualModel))
+	mux.HandleFunc("POST /api/admin/virtual-models/{id}/speedtest", protect(a.handleSpeedTest))
+	mux.HandleFunc("POST /api/admin/virtual-models/{id}/probe", protect(a.handleLightProbe))
 
 	mux.HandleFunc("GET /api/admin/users", protect(a.handleListUsers))
 	mux.HandleFunc("POST /api/admin/users", protect(a.handleCreateUser))
@@ -435,6 +439,17 @@ func (a *Admin) handleDeleteChannelKey(w http.ResponseWriter, r *http.Request) {
 
 // ---------- quotas ----------
 
+// normalizeModelType maps unknown/empty type values to a known set.
+func normalizeModelType(t string) string {
+	switch t {
+	case domain.ModelTypeSpeech, domain.ModelTypeImage, domain.ModelTypeVideo,
+		domain.ModelTypeEmbed, domain.ModelTypeOther:
+		return t
+	default:
+		return domain.ModelTypeText
+	}
+}
+
 func (a *Admin) handleListQuotas(w http.ResponseWriter, r *http.Request) {
 	filter := bson.M{}
 	if cid := r.URL.Query().Get("channelId"); cid != "" {
@@ -463,6 +478,7 @@ func (a *Admin) handleCreateQuota(w http.ResponseWriter, r *http.Request) {
 	if q.Mode != domain.ModeCalls {
 		q.Mode = domain.ModeToken
 	}
+	q.Type = normalizeModelType(q.Type)
 	created, err := a.st.CreateQuota(r.Context(), &q)
 	if err != nil {
 		if err == store.ErrNameConflict {
@@ -487,10 +503,19 @@ func (a *Admin) handleUpdateQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q.ID = id
+	if q.ChannelID.IsZero() || q.Model == "" {
+		writeErr(w, http.StatusBadRequest, "channelId and model are required")
+		return
+	}
 	if q.Mode != domain.ModeCalls {
 		q.Mode = domain.ModeToken
 	}
+	q.Type = normalizeModelType(q.Type)
 	if err := a.st.UpdateQuota(r.Context(), &q); err != nil {
+		if err == store.ErrNameConflict {
+			writeErr(w, http.StatusConflict, "quota already exists for this channel+model")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -519,6 +544,15 @@ func (a *Admin) handleAdjustQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "remaining": newRemaining})
+}
+
+// handleResetQuotaStatus manually recovers a quota to "ok" status.
+func (a *Admin) handleResetQuotaStatus(w http.ResponseWriter, r *http.Request) {
+	if err := a.st.SetQuotaStatus(r.Context(), r.PathValue("id"), domain.QuotaStatusOK, ""); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // ---------- virtual models ----------
@@ -579,6 +613,34 @@ func (a *Admin) handleDeleteVirtualModel(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleSpeedTest probes each candidate with a real tiny request (quota billed).
+func (a *Admin) handleSpeedTest(w http.ResponseWriter, r *http.Request) {
+	if a.gw == nil {
+		writeErr(w, http.StatusServiceUnavailable, "gateway not ready")
+		return
+	}
+	results, err := a.gw.SpeedTest(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+// handleLightProbe hits GET /models on each candidate (zero token cost).
+func (a *Admin) handleLightProbe(w http.ResponseWriter, r *http.Request) {
+	if a.gw == nil {
+		writeErr(w, http.StatusServiceUnavailable, "gateway not ready")
+		return
+	}
+	results, err := a.gw.LightProbe(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }
 
 // ---------- users & tokens ----------

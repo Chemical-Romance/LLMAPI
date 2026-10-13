@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config is runtime configuration, all controllable via environment variables.
@@ -15,6 +16,7 @@ type Config struct {
 	AdminUser string
 	AdminPass string  // empty means auto-generate
 	LogQuota  float64 // default reserved tokens per request when max_tokens is unknown
+	CoolSec   int     // failover cooldown seconds after an upstream failure
 }
 
 func Get() *Config {
@@ -25,6 +27,7 @@ func Get() *Config {
 		AdminUser: envOr("ADMIN_USER", "admin"),
 		AdminPass: os.Getenv("ADMIN_PASSWORD"),
 		LogQuota:  envFloat("DEFAULT_RESERVE_TOKENS", 2048),
+		CoolSec:   envInt("FAILOVER_COOLDOWN_SEC", 60),
 	}
 	return c
 }
@@ -33,6 +36,12 @@ func Get() *Config {
 // client does not specify max_tokens.
 func (c *Config) DefaultReserveTokens() int64 {
 	return int64(c.LogQuota)
+}
+
+// FailoverCooldown returns how long a candidate stays marked unavailable after
+// an upstream failure (0 disables the circuit breaker).
+func (c *Config) FailoverCooldown() time.Duration {
+	return time.Duration(c.CoolSec) * time.Second
 }
 
 func envOr(key, def string) string {
@@ -46,6 +55,15 @@ func envFloat(key string, def float64) float64 {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
 			return f
+		}
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
 		}
 	}
 	return def

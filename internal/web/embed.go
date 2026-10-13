@@ -4,6 +4,7 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"path"
 	"strings"
 )
 
@@ -27,10 +28,13 @@ func Handler() http.Handler {
 		if p == "" {
 			p = "/"
 		}
-		// client-side route -> serve index.html
-		if !strings.Contains(p, ".") {
-			r.URL.Path = "/index.html"
+		// client-side route -> serve the directory index (index.html).
+		// Rewriting to "/index.html" would make FileServer 301 to "./",
+		// causing an infinite redirect loop under /console/.
+		if !strings.Contains(path.Base(p), ".") {
+			p = "/"
 		}
+		r.URL.Path = p
 		w.Header().Set("Cache-Control", "no-cache")
 		fileServer.ServeHTTP(w, r)
 	})

@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -38,13 +40,17 @@ func (e AttemptError) String() string {
 }
 
 type Engine struct {
-	store *store.Store
-	mu    sync.Mutex
-	rr    map[bson.ObjectID]*atomic.Uint64
+	store    *store.Store
+	cooldown time.Duration // half-open retry window for "unavailable" quotas
+	mu       sync.Mutex
+	rr       map[bson.ObjectID]*atomic.Uint64
 }
 
-func NewEngine(st *store.Store) *Engine {
-	return &Engine{store: st, rr: map[bson.ObjectID]*atomic.Uint64{}}
+func NewEngine(st *store.Store, cooldown time.Duration) *Engine {
+	if cooldown < 0 {
+		cooldown = 0
+	}
+	return &Engine{store: st, cooldown: cooldown, rr: map[bson.ObjectID]*atomic.Uint64{}}
 }
 
 func (e *Engine) counter(id bson.ObjectID) *atomic.Uint64 {
@@ -87,7 +93,10 @@ func ReserveNeed(q *domain.Quota, maxTokens int64, n int64, defaultReserve int64
 // Pick resolves a virtual model name into the first usable target.
 // It iterates candidates by priority, atomically reserves quota, and returns
 // the target plus per-candidate reasons when everything failed. Candidates in
-// `exclude` (key "channelID|model") are skipped (already attempted channels).
+// `exclude` (key "channelID|model") are skipped (already attempted this request),
+// and quotas whose status is not "ok" (unavailable/insufficient) are skipped
+// so the same broken candidate is not hammered by every request. An
+// "unavailable" quota is retried half-open after the cooldown window.
 func (e *Engine) Pick(ctx context.Context, virtualModel string, maxTokens, n int64, defaultReserve int64, exclude map[string]bool) (*Target, []AttemptError, error) {
 	vm, err := e.store.GetVirtualModelByName(ctx, virtualModel)
 	if err != nil {
@@ -107,57 +116,15 @@ func (e *Engine) Pick(ctx context.Context, virtualModel string, maxTokens, n int
 			fails = append(fails, AttemptError{ChannelName: "?", Model: c.Model, Reason: "skipped (previous failure)"})
 			continue
 		}
-		ch, err := e.store.GetChannel(ctx, c.ChannelID)
-		if err != nil || !ch.Enabled {
-			fails = append(fails, AttemptError{ChannelName: chName(ch), Model: c.Model, Reason: "channel disabled or missing"})
+		if !c.IsEnabled() {
+			fails = append(fails, AttemptError{ChannelName: "?", Model: c.Model, Reason: "候选已停用"})
 			continue
 		}
-		keys, err := e.store.ListChannelKeys(ctx, ch.ID)
-		if err != nil {
-			fails = append(fails, AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "load keys: " + err.Error()})
-			continue
+		tgt, fail := e.tryCandidate(ctx, c, maxTokens, n, defaultReserve)
+		if tgt != nil {
+			return tgt, nil, nil
 		}
-		enabledKeys := make([]domain.ChannelKey, 0, len(keys))
-		for _, k := range keys {
-			if k.Enabled {
-				enabledKeys = append(enabledKeys, k)
-			}
-		}
-		if len(enabledKeys) == 0 {
-			fails = append(fails, AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "no enabled API key"})
-			continue
-		}
-		quota, err := e.store.GetQuota(ctx, ch.ID, c.Model)
-		if err != nil {
-			fails = append(fails, AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "quota not configured"})
-			continue
-		}
-		if !quota.Enabled {
-			fails = append(fails, AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "quota disabled"})
-			continue
-		}
-		need := ReserveNeed(quota, maxTokens, n, defaultReserve)
-		ok, err := e.store.Reserve(ctx, quota.ID, need)
-		if err != nil {
-			fails = append(fails, AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "reserve error: " + err.Error()})
-			continue
-		}
-		if !ok {
-			fails = append(fails, AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: fmt.Sprintf("insufficient quota (need %.0f, left %.0f)", need, quota.Remaining)})
-			continue
-		}
-		// pick a key round-robin
-		idx := int(e.counter(ch.ID).Add(1)-1) % len(enabledKeys)
-		return &Target{
-			Channel:       ch,
-			Key:           &enabledKeys[idx],
-			QuotaID:       quota.ID,
-			Mode:          quota.Mode,
-			Reserved:      need,
-			ActualModel:   c.Model,
-			Multiplier:    quota.Multiplier,
-			ChargePerCall: quota.ChargePerCall,
-		}, nil, nil
+		fails = append(fails, *fail)
 	}
 
 	// aggregate reasons
@@ -174,9 +141,102 @@ func (e *Engine) Pick(ctx context.Context, virtualModel string, maxTokens, n int
 	return nil, fails, fmt.Errorf("all candidates failed: %s", sb)
 }
 
+// tryCandidate attempts one candidate: loads channel/keys/quota and reserves
+// quota. Returns the target, or a diagnostic reason on failure.
+func (e *Engine) tryCandidate(ctx context.Context, c domain.Candidate, maxTokens, n int64, defaultReserve int64) (*Target, *AttemptError) {
+	ch, err := e.store.GetChannel(ctx, c.ChannelID)
+	if err != nil || !ch.Enabled {
+		fail := AttemptError{ChannelName: chName(ch), Model: c.Model, Reason: "channel disabled or missing"}
+		return nil, &fail
+	}
+	keys, err := e.store.ListChannelKeys(ctx, ch.ID)
+	if err != nil {
+		fail := AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "load keys: " + err.Error()}
+		return nil, &fail
+	}
+	enabledKeys := make([]domain.ChannelKey, 0, len(keys))
+	for _, k := range keys {
+		if k.Enabled {
+			enabledKeys = append(enabledKeys, k)
+		}
+	}
+	if len(enabledKeys) == 0 {
+		fail := AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "no enabled API key"}
+		return nil, &fail
+	}
+	quota, err := e.store.GetQuota(ctx, ch.ID, c.Model)
+	if err != nil {
+		fail := AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "quota not configured"}
+		return nil, &fail
+	}
+	if !quota.Enabled {
+		fail := AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "quota disabled"}
+		return nil, &fail
+	}
+	// Status gate: only "ok" quotas are routable. An "unavailable" quota is
+	// retried half-open once the cooldown window has passed since statusAt.
+	if quota.Status == domain.QuotaStatusUnavailable {
+		if d := e.cooldown; d > 0 && quota.StatusAt.Add(d).After(time.Now()) {
+			left := time.Until(quota.StatusAt.Add(d))
+			fail := AttemptError{ChannelName: ch.Name, Model: c.Model,
+				Reason: fmt.Sprintf("不可用: %s (%ds后可重试)", reasonSnippet(quota.StatusReason), int(left.Seconds()+0.999))}
+			return nil, &fail
+		}
+		// half-open: fall through and give it one trial
+	}
+	if quota.Remaining <= 0 {
+		if quota.Status != domain.QuotaStatusInsufficient {
+			_ = e.store.SetQuotaStatus(ctx, quota.ID, domain.QuotaStatusInsufficient, "insufficient quota")
+		}
+		fail := AttemptError{ChannelName: ch.Name, Model: c.Model,
+			Reason: fmt.Sprintf("insufficient quota (need %.0f, left %.0f)", ReserveNeed(quota, maxTokens, n, defaultReserve), quota.Remaining)}
+		return nil, &fail
+	}
+	if quota.Status == domain.QuotaStatusInsufficient {
+		// topped up outside adjust paths — recover
+		_ = e.store.SetQuotaStatus(ctx, quota.ID, domain.QuotaStatusOK, "")
+		quota.Status = domain.QuotaStatusOK
+	}
+	need := ReserveNeed(quota, maxTokens, n, defaultReserve)
+	ok, err := e.store.Reserve(ctx, quota.ID, need)
+	if err != nil {
+		fail := AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "reserve error: " + err.Error()}
+		return nil, &fail
+	}
+	if !ok {
+		_ = e.store.SetQuotaStatus(ctx, quota.ID, domain.QuotaStatusInsufficient, "insufficient quota")
+		fail := AttemptError{ChannelName: ch.Name, Model: c.Model,
+			Reason: fmt.Sprintf("insufficient quota (need %.0f, left %.0f)", need, quota.Remaining)}
+		return nil, &fail
+	}
+	// pick a key round-robin
+	idx := int(e.counter(ch.ID).Add(1)-1) % len(enabledKeys)
+	return &Target{
+		Channel:       ch,
+		Key:           &enabledKeys[idx],
+		QuotaID:       quota.ID,
+		Mode:          quota.Mode,
+		Reserved:      need,
+		ActualModel:   c.Model,
+		Multiplier:    quota.Multiplier,
+		ChargePerCall: quota.ChargePerCall,
+	}, nil
+}
+
 func chName(ch *domain.Channel) string {
 	if ch == nil {
 		return "?"
 	}
 	return ch.Name
+}
+
+func reasonSnippet(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "upstream failed"
+	}
+	if len(s) > 80 {
+		return s[:80] + "…"
+	}
+	return s
 }

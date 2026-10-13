@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -47,15 +48,16 @@ func main() {
 
 	// wiring
 	st := store.New(d)
-	engine := route.NewEngine(st)
+	engine := route.NewEngine(st, cfg.FailoverCooldown())
 	gw := api.NewGateway(cfg, st, engine)
 	adminAuth := api.NewAdminAuth(secret)
-	adm := api.NewAdmin(st, adminAuth)
+	adm := api.NewAdmin(st, adminAuth, gw)
 
 	mux := http.NewServeMux()
 	adm.Register(mux)                      // /api/admin/*
 	gw.Register(mux)                       // /v1/*
 	mux.Handle("/console/", web.Handler()) // admin console (embedded SPA)
+	mux.Handle("/", http.RedirectHandler("/console/", http.StatusMovedPermanently))
 
 	// No WriteTimeout: SSE responses must be allowed to stream indefinitely.
 	srv := &http.Server{
@@ -67,8 +69,16 @@ func main() {
 	}
 	errCh := make(chan error, 1)
 	go func() {
+		// tcp4: Go's ":port" would bind an IPv6 dual-stack socket, and the
+		// WSL->Windows localhost relay then only exposes [::1], leaving
+		// 127.0.0.1 unreachable from Windows.
+		l, err := net.Listen("tcp4", cfg.HTTPAddr)
+		if err != nil {
+			errCh <- err
+			return
+		}
 		log.Printf("[serve] listening on http://%s  (console: http://%s/console/, admin API: /api/admin/*)", cfg.HTTPAddr, cfg.HTTPAddr)
-		errCh <- srv.ListenAndServe()
+		errCh <- srv.Serve(l)
 	}()
 
 	select {
