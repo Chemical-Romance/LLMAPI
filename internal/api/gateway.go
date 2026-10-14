@@ -175,7 +175,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 			break
 		}
-		err = g.tryChat(ctx, w, tok, meta, body, tgt)
+		err = g.tryChat(ctx, w, tok, meta, body, thinking, tgt)
 		if err == nil {
 			_ = g.st.SetQuotaStatus(context.WithoutCancel(ctx), tgt.QuotaID, domain.QuotaStatusOK, "")
 			return
@@ -221,7 +221,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 // tryChat performs one upstream attempt. On success it writes the response and
 // returns nil. A non-nil error means nothing was written to the client yet, so
 // the caller may safely fail over to another candidate.
-func (g *Gateway) tryChat(ctx context.Context, w http.ResponseWriter, tok *domain.Token, meta chatMeta, body []byte, tgt *route.Target) error {
+func (g *Gateway) tryChat(ctx context.Context, w http.ResponseWriter, tok *domain.Token, meta chatMeta, body []byte, thinking string, tgt *route.Target) error {
 	start := time.Now()
 	reqBody, err := upstream.RewriteModel(body, tgt.ActualModel)
 	if err != nil {
@@ -245,7 +245,7 @@ func (g *Gateway) tryChat(ctx context.Context, w http.ResponseWriter, tok *domai
 	}
 
 	if meta.Stream {
-		return g.streamChat(ctx, w, resp, tok, tgt, body, meta.Model)
+		return g.streamChat(ctx, w, resp, tok, tgt, body, thinking, meta.Model)
 	}
 
 	out, err := io.ReadAll(resp.Body)
@@ -257,7 +257,7 @@ func (g *Gateway) tryChat(ctx context.Context, w http.ResponseWriter, tok *domai
 	actual, pt, ct, tt := g.settleChat(tgt, usage, promptEst, "")
 	// WithoutCancel: settle even if the client disconnected after the upstream
 	// response arrived, so the reservation never leaks.
-	g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/chat/completions", meta.Model, tgt.ActualModel, thinkingFromBody(body), pt, ct, tt, 0, "success", "", time.Since(start).Milliseconds())
+	g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/chat/completions", meta.Model, tgt.ActualModel, thinking, pt, ct, tt, 0, "success", "", time.Since(start).Milliseconds())
 
 	copyHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
@@ -268,7 +268,7 @@ func (g *Gateway) tryChat(ctx context.Context, w http.ResponseWriter, tok *domai
 
 // streamChat forwards an SSE stream verbatim and settles quota from the final
 // usage chunk (or a heuristic estimate).
-func (g *Gateway) streamChat(ctx context.Context, w http.ResponseWriter, resp *http.Response, tok *domain.Token, tgt *route.Target, body []byte, virtualModel string) error {
+func (g *Gateway) streamChat(ctx context.Context, w http.ResponseWriter, resp *http.Response, tok *domain.Token, tgt *route.Target, body []byte, thinking string, virtualModel string) error {
 	flusher, _ := w.(http.Flusher)
 	reader := bufio.NewReader(resp.Body)
 	var usage upstream.Usage
@@ -284,7 +284,7 @@ func (g *Gateway) streamChat(ctx context.Context, w http.ResponseWriter, resp *h
 		}
 		promptEst := upstream.EstimatePromptTokens(body)
 		actual, pt, ct, tt := g.settleChat(tgt, usage, promptEst, completionText.String())
-		g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/chat/completions", virtualModel, tgt.ActualModel, thinkingFromBody(body), pt, ct, tt, 0, "success", "", time.Since(start).Milliseconds())
+		g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/chat/completions", virtualModel, tgt.ActualModel, thinking, pt, ct, tt, 0, "success", "", time.Since(start).Milliseconds())
 	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -523,7 +523,20 @@ func (g *Gateway) tryImages(ctx context.Context, w http.ResponseWriter, tok *dom
 // extractThinkingMode reports the explicit thinking toggle in the request body:
 // "off" when disabled, "on" when enabled, "" when not set.
 func extractThinkingMode(bmap map[string]any) string {
-	if t, ok := bmap["thinking"].(map[string]any); ok {
+	switch t := bmap["thinking"].(type) {
+	case bool:
+		if t {
+			return "on"
+		}
+		return "off"
+	case string:
+		switch t {
+		case "off", "disabled", "false", "0":
+			return "off"
+		case "on", "enabled", "true", "1":
+			return "on"
+		}
+	case map[string]any:
 		if typ, _ := t["type"].(string); typ != "" {
 			if typ == "disabled" || typ == "off" {
 				return "off"
@@ -537,15 +550,24 @@ func extractThinkingMode(bmap map[string]any) string {
 		}
 		return "off"
 	}
-	return ""
-}
-
-func thinkingFromBody(body []byte) string {
-	var m map[string]any
-	if json.Unmarshal(body, &m) != nil {
-		return ""
+	// vLLM / SiliconFlow / many Chinese providers nest the toggle here
+	// (e.g. Qwen3 via chat_template_kwargs).
+	if ck, ok := bmap["chat_template_kwargs"].(map[string]any); ok {
+		if v, ok := ck["enable_thinking"].(bool); ok {
+			if v {
+				return "on"
+			}
+			return "off"
+		}
 	}
-	return extractThinkingMode(m)
+	// OpenAI o-series style: reasoning_effort present means reasoning is active.
+	if s, ok := bmap["reasoning_effort"].(string); ok && s != "" {
+		if s == "none" || s == "off" {
+			return "off"
+		}
+		return "on"
+	}
+	return ""
 }
 
 func extractMaxTokens(bmap map[string]any) int64 {
