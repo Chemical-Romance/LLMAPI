@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -552,6 +553,11 @@ func (s *Store) ListVirtualModels(ctx context.Context) ([]domain.VirtualModel, e
 	out := []domain.VirtualModel{}
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
+	}
+	for i := range out {
+		sort.SliceStable(out[i].Candidates, func(a, b int) bool {
+			return out[i].Candidates[a].Priority < out[i].Candidates[b].Priority
+		})
 	}
 	return out, nil
 }

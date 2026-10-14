@@ -456,6 +456,7 @@
       ${vms.map((vm) => {
         const sp = vm.speedTest;
         const pr = vm.probe;
+        const cands = (vm.candidates || []).slice().sort((a, b) => a.priority - b.priority);
         return `
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center">
@@ -471,8 +472,8 @@
             <button class="btn small danger" data-del="${vm.id}" data-name="${esc(vm.name)}">删除</button></div>
           </div>
           <table style="margin-top:12px"><tr><th>优先级</th><th>状态</th><th>渠道</th><th>上游模型</th><th>额度</th><th>轻测 / 测速</th><th></th></tr>
-          ${vm.candidates.length === 0 ? '<tr><td colspan="7" class="muted">未配置候选渠道</td></tr>' :
-            vm.candidates.map((c, i) => {
+          ${cands.length === 0 ? '<tr><td colspan="7" class="muted">未配置候选渠道</td></tr>' :
+            cands.map((c, i) => {
               const off = c.enabled === false;
               const q = quotasList.find((x) => x.channelId === c.channelId && x.model === c.model);
               const spv = sp && sp.results && sp.results.find((x) => x.channelId === c.channelId && x.model === c.model);
@@ -571,6 +572,10 @@
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <b style="font-size:13px">批量添加候选</b>
             <select id="ba-channel" style="flex:1;min-width:140px">${chs.map((ch) => `<option value="${ch.id}">${esc(ch.name)}</option>`).join("")}</select>
+            <select id="ba-type" style="width:90px">
+              <option value="">全部类型</option>
+              ${MODEL_TYPES.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}
+            </select>
             <button type="button" class="btn small" id="ba-load">加载该渠道模型</button>
           </div>
           <div id="ba-list" class="muted" style="margin-top:8px;font-size:13px">选择渠道后点击「加载该渠道模型」，勾选多个模型一次性加入候选。</div>
@@ -622,37 +627,68 @@
     // batch-add candidates: pick a channel, multi-select its models
     const baList = m.root.querySelector("#ba-list");
     const baAdd = m.root.querySelector("#ba-add");
+    const baType = m.root.querySelector("#ba-type");
     const baChecked = new Set();
+    let baQuotas = []; // models loaded for the current channel
     const syncBa = () => {
       baAdd.disabled = baChecked.size === 0;
       baAdd.textContent = `加入候选（${baChecked.size}）`;
     };
+    const renderBaList = () => {
+      const chId = m.root.querySelector("#ba-channel").value;
+      const typeFilter = baType.value;
+      const shown = typeFilter ? baQuotas.filter((q) => (q.type || "text") === typeFilter) : baQuotas;
+      if (!baQuotas.length) {
+        baList.innerHTML = '<div class="muted" style="padding:6px 0">该渠道暂无已配置额度的模型，可先到「额度管理」添加。</div>';
+        return;
+      }
+      if (!shown.length) {
+        baList.innerHTML = `<div class="muted" style="padding:6px 0">该渠道没有「${typeLabel(typeFilter)}」类型的模型。</div>`;
+        return;
+      }
+      const rowsHtml = shown.map((q) => {
+        const already = cands.some((c) => c.channelId === chId && c.model === q.model);
+        return `<label class="ba-row${already ? " disabled" : ""}">
+          <input type="checkbox" data-ba-model="${esc(q.model)}" ${already ? "checked disabled" : ""} />
+          <span class="ba-name">${esc(q.model)} ${typeBadge(q.type)}</span>
+          <span class="ba-quota muted">${already ? "已在候选" : `剩 ${fmt(q.remaining)} · ${q.mode === "calls" ? "按次" : "按token"}`}</span>
+        </label>`;
+      }).join("");
+      baList.innerHTML = `
+        <label class="ba-row ba-head">
+          <input type="checkbox" id="ba-all" />
+          <span class="ba-name"><b>全选</b></span>
+          <span class="ba-quota muted">${typeFilter ? typeLabel(typeFilter) : "全部"} · ${shown.length} 个</span>
+        </label>
+        <div class="ba-scroll">${rowsHtml}</div>`;
+
+      const selectable = () => [...baList.querySelectorAll("[data-ba-model]")].filter((cb) => !cb.disabled);
+      const allCb = baList.querySelector("#ba-all");
+      allCb.onchange = () => {
+        selectable().forEach((cb) => {
+          cb.checked = allCb.checked;
+          if (allCb.checked) baChecked.add(cb.dataset.baModel);
+          else baChecked.delete(cb.dataset.baModel);
+        });
+        syncBa();
+      };
+      baList.querySelectorAll("[data-ba-model]").forEach((cb) => (cb.onchange = () => {
+        if (cb.checked) baChecked.add(cb.dataset.baModel);
+        else baChecked.delete(cb.dataset.baModel);
+        const sels = selectable();
+        allCb.checked = sels.length > 0 && sels.every((x) => x.checked);
+        syncBa();
+      }));
+    };
+    baType.onchange = renderBaList;
     m.root.querySelector("#ba-load").onclick = () => {
       const chId = m.root.querySelector("#ba-channel").value;
       const quotas = (state.cache.quotas || []).filter((q) => q.channelId === chId);
       const modelsMap = new Map();
       quotas.forEach((q) => { if (q.model && !modelsMap.has(q.model)) modelsMap.set(q.model, q); });
-      if (!modelsMap.size) {
-        baList.innerHTML = '<span class="muted">该渠道暂无已配置额度的模型，可先到「额度管理」添加。</span>';
-        baChecked.clear(); syncBa();
-        return;
-      }
-      const ch = chs.find((c) => c.id === chId);
-      baList.innerHTML = [...modelsMap.values()].map((q) => {
-        const already = cands.some((c) => c.channelId === chId && c.model === q.model);
-        return `<label style="display:flex;align-items:center;gap:6px;padding:3px 0;${already ? "opacity:.5" : ""}">
-          <input type="checkbox" data-ba-model="${esc(q.model)}" ${already ? "checked disabled" : ""} />
-          <b>${esc(q.model)}</b>
-          <span class="muted">剩 ${fmt(q.remaining)} · ${q.mode === "calls" ? "按次" : "按token"}</span>
-          ${already ? '<span class="badge">已在候选</span>' : ""}
-        </label>`;
-      }).join("");
+      baQuotas = [...modelsMap.values()];
       baChecked.clear(); syncBa();
-      baList.querySelectorAll("[data-ba-model]").forEach((cb) => (cb.onchange = () => {
-        if (cb.checked) baChecked.add(cb.dataset.baModel);
-        else baChecked.delete(cb.dataset.baModel);
-        syncBa();
-      }));
+      renderBaList();
     };
     baAdd.onclick = () => {
       const chId = m.root.querySelector("#ba-channel").value;

@@ -183,3 +183,17 @@ textarea { min-height: 60px; font-family: monospace; }
 .filter-row label { font-size: 12px; color: var(--muted); margin-bottom: 4px; display: block; }
 
 .tooltip { position: relative; }
+
+/* batch-add model list (route editor) */
+.ba-row {
+  display: grid; grid-template-columns: 22px 1fr auto; gap: 8px;
+  align-items: center; padding: 5px 6px; border-radius: 6px; cursor: pointer;
+  font-size: 13px;
+}
+.ba-row:hover:not(.disabled):not(.ba-head) { background: var(--bg3); }
+.ba-row input[type="checkbox"] { margin: 0; justify-self: start; }
+.ba-row .ba-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ba-row .ba-quota { font-size: 12px; white-space: nowrap; }
+.ba-row.disabled { opacity: .5; cursor: default; }
+.ba-row.ba-head { border-bottom: 1px solid var(--border); border-radius: 6px 6px 0 0; margin-bottom: 2px; }
+.ba-scroll { max-height: 220px; overflow-y: auto; }
