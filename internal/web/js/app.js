@@ -810,17 +810,18 @@ print(resp.choices[0].message.content)</pre>
         <button class="btn" id="f-reset">重置</button>
       </div>
       <div class="card">
-        <table><tr><th>时间</th><th>虚拟模型</th><th>渠道</th><th>上游模型</th><th>模式</th><th>Token</th><th>消耗</th><th>状态</th></tr>
+        <table><tr><th>时间</th><th>虚拟模型</th><th>渠道</th><th>上游模型</th><th>模式</th><th>思考</th><th>Token</th><th>消耗</th><th>状态</th></tr>
         ${r.items.map((l) => `<tr>
           <td class="muted">${fmtTime(l.createdAt)}</td>
           <td><b>${esc(l.virtualModel)}</b></td>
           <td>${esc(l.channelName || l.channelId)} </td>
           <td class="muted">${esc(l.actualModel || "")}${l.images ? ` <span class="badge blue">${l.images}图</span>` : ""}</td>
           <td>${l.mode === "calls" ? "按次" : "按token"}</td>
+          <td>${l.thinking === "off" ? '<span class="badge bad">关</span>' : l.thinking === "on" ? '<span class="badge ok">开</span>' : '<span class="muted">-</span>'}</td>
           <td>${fmt(l.totalTokens)}</td>
           <td>${fmt(l.charge)}</td>
           <td>${l.status === "success" ? '<span class="badge ok">成功</span>' : `<span class="badge bad">失败</span>`}</td></tr>
-          ${l.error ? `<tr><td colspan="8" class="error-text" style="font-size:12px">${esc(l.error)}</td></tr>` : ""}`).join("") || '<tr><td colspan="8" class="muted">暂无日志</td></tr>'}
+          ${l.error ? `<tr><td colspan="9" class="error-text" style="font-size:12px">${esc(l.error)}</td></tr>` : ""}`).join("") || '<tr><td colspan="9" class="muted">暂无日志</td></tr>'}
         </table>
         <div class="pagination">
           <button class="btn small" id="prev-page" ${logF.page <= 1 ? "disabled" : ""}>上一页</button>

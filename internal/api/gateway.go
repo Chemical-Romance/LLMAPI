@@ -155,6 +155,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	var bmap map[string]any
 	_ = json.Unmarshal(body, &bmap)
 	maxTokens := extractMaxTokens(bmap)
+	thinking := extractThinkingMode(bmap)
 
 	ctx := r.Context()
 	excluded := map[string]bool{}
@@ -198,7 +199,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	if clientGone {
 		g.logs.submit(&domain.RequestLog{
 			UserID: tok.UserID, TokenID: tok.ID, Endpoint: "/v1/chat/completions",
-			VirtualModel: meta.Model, Status: "error", Error: "client disconnected",
+			VirtualModel: meta.Model, Thinking: thinking, Status: "error", Error: "client disconnected",
 			LatencyMs: time.Since(start).Milliseconds(), CreatedAt: time.Now().UTC(),
 		})
 		log.Printf("[chat] client disconnected %s model=%s", tok.Name, meta.Model)
@@ -210,7 +211,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	finalErr := fmt.Sprintf("no available channel could serve this request: %s", lastErrStr)
 	g.logs.submit(&domain.RequestLog{
 		UserID: tok.UserID, TokenID: tok.ID, Endpoint: "/v1/chat/completions",
-		VirtualModel: meta.Model, Status: "error", Error: finalErr,
+		VirtualModel: meta.Model, Thinking: thinking, Status: "error", Error: finalErr,
 		LatencyMs: time.Since(start).Milliseconds(), CreatedAt: time.Now().UTC(),
 	})
 	log.Printf("[chat] FAIL %s model=%s err=%s", tok.Name, meta.Model, finalErr)
@@ -256,7 +257,7 @@ func (g *Gateway) tryChat(ctx context.Context, w http.ResponseWriter, tok *domai
 	actual, pt, ct, tt := g.settleChat(tgt, usage, promptEst, "")
 	// WithoutCancel: settle even if the client disconnected after the upstream
 	// response arrived, so the reservation never leaks.
-	g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/chat/completions", meta.Model, tgt.ActualModel, pt, ct, tt, 0, "success", "", time.Since(start).Milliseconds())
+	g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/chat/completions", meta.Model, tgt.ActualModel, thinkingFromBody(body), pt, ct, tt, 0, "success", "", time.Since(start).Milliseconds())
 
 	copyHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
@@ -283,7 +284,7 @@ func (g *Gateway) streamChat(ctx context.Context, w http.ResponseWriter, resp *h
 		}
 		promptEst := upstream.EstimatePromptTokens(body)
 		actual, pt, ct, tt := g.settleChat(tgt, usage, promptEst, completionText.String())
-		g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/chat/completions", virtualModel, tgt.ActualModel, pt, ct, tt, 0, "success", "", time.Since(start).Milliseconds())
+		g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/chat/completions", virtualModel, tgt.ActualModel, thinkingFromBody(body), pt, ct, tt, 0, "success", "", time.Since(start).Milliseconds())
 	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -361,7 +362,7 @@ func (g *Gateway) settleChat(tgt *route.Target, usage upstream.Usage, promptEst 
 }
 
 // settle persists consumption: confirm the reservation and write a request log.
-func (g *Gateway) settle(ctx context.Context, tgt *route.Target, actual float64, tok *domain.Token, endpoint, virtualModel, actualModel string, pt, ct, tt int64, images int, status, errMsg string, latencyMs int64) {
+func (g *Gateway) settle(ctx context.Context, tgt *route.Target, actual float64, tok *domain.Token, endpoint, virtualModel, actualModel, thinking string, pt, ct, tt int64, images int, status, errMsg string, latencyMs int64) {
 	// Billing must not be canceled by a client disconnect.
 	if err := g.st.Confirm(context.WithoutCancel(ctx), tgt.QuotaID, tgt.Reserved, actual); err != nil {
 		log.Printf("[settle] confirm failed for quota %s: %v", tgt.QuotaID.Hex(), err)
@@ -374,6 +375,7 @@ func (g *Gateway) settle(ctx context.Context, tgt *route.Target, actual float64,
 		ChannelName:      tgt.Channel.Name,
 		ActualModel:      actualModel,
 		Mode:             tgt.Mode,
+		Thinking:         thinking,
 		PromptTokens:     pt,
 		CompletionTokens: ct,
 		TotalTokens:      tt,
@@ -507,7 +509,7 @@ func (g *Gateway) tryImages(ctx context.Context, w http.ResponseWriter, tok *dom
 	}
 	// WithoutCancel: settle even if the client disconnected, so the
 	// reservation never leaks.
-	g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/images/generations", meta.Model, tgt.ActualModel, 0, 0, 0, images, "success", "", time.Since(start).Milliseconds())
+	g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/images/generations", meta.Model, tgt.ActualModel, "", 0, 0, 0, images, "success", "", time.Since(start).Milliseconds())
 
 	copyHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
@@ -517,6 +519,34 @@ func (g *Gateway) tryImages(ctx context.Context, w http.ResponseWriter, tok *dom
 }
 
 // ---------- helpers ----------
+
+// extractThinkingMode reports the explicit thinking toggle in the request body:
+// "off" when disabled, "on" when enabled, "" when not set.
+func extractThinkingMode(bmap map[string]any) string {
+	if t, ok := bmap["thinking"].(map[string]any); ok {
+		if typ, _ := t["type"].(string); typ != "" {
+			if typ == "disabled" || typ == "off" {
+				return "off"
+			}
+			return "on"
+		}
+	}
+	if v, ok := bmap["enable_thinking"].(bool); ok {
+		if v {
+			return "on"
+		}
+		return "off"
+	}
+	return ""
+}
+
+func thinkingFromBody(body []byte) string {
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		return ""
+	}
+	return extractThinkingMode(m)
+}
 
 func extractMaxTokens(bmap map[string]any) int64 {
 	for _, k := range []string{"max_tokens", "max_completion_tokens"} {

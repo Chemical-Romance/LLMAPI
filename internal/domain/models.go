@@ -152,6 +152,7 @@ type RequestLog struct {
 	ChannelName      string        `bson:"channelName,omitempty" json:"channelName"`
 	ActualModel      string        `bson:"actualModel,omitempty" json:"actualModel"`
 	Mode             string        `bson:"mode,omitempty" json:"mode"`
+	Thinking         string        `bson:"thinking,omitempty" json:"thinking,omitempty"` // on | off | "" (not set)
 	PromptTokens     int64         `bson:"promptTokens" json:"promptTokens"`
 	CompletionTokens int64         `bson:"completionTokens" json:"completionTokens"`
 	TotalTokens      int64         `bson:"totalTokens" json:"totalTokens"`

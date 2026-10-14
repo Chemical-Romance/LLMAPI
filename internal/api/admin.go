@@ -290,7 +290,7 @@ func channelFromReq(req channelReq, id bson.ObjectID, createdAt time.Time) *doma
 		ch.AuthType = domain.AuthTypeBearer
 	}
 	if ch.TimeoutSec <= 0 {
-		ch.TimeoutSec = 120
+		ch.TimeoutSec = 300
 	}
 	if req.Enabled != nil {
 		ch.Enabled = *req.Enabled
