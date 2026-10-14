@@ -1,0 +1,29 @@
+# llm-api 独立编排：单独构建/重启，与 skillbook 的 compose 文件互不干扰
+# B 方案：通过 external 网络加入 skillbook_default，复用 skillbook 的 mongo 容器，
+#         数据存于独立的 llm_api 库（与 skillbook 库互不影响）
+name: llm-api
+
+services:
+  llm-router:
+    build: .
+    restart: unless-stopped
+    # 业务密钥/管理员密码来自 ./.env（该文件不提交到 Git）
+    env_file:
+      - ./.env
+    environment:
+      HTTP_ADDR: ':8081'
+    ports:
+      - '8081:8081'
+    healthcheck:
+      # /console/ 无需鉴权，200 视为健康
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:8081/console/ >/dev/null 2>&1']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+# 复用 skillbook 的默认网络（mongo 容器就在这个网络里，容器名即 DNS）
+networks:
+  default:
+    name: skillbook_default
+    external: true

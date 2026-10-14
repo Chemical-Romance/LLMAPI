@@ -426,7 +426,8 @@ func (s *Store) UpdateQuota(ctx context.Context, q *domain.Quota) error {
 	_, err := s.DB.Quotas.UpdateOne(ctx, bson.M{"_id": q.ID}, bson.M{"$set": bson.M{
 		"channelId": q.ChannelID, "model": q.Model,
 		"mode": q.Mode, "type": q.Type, "remaining": q.Remaining, "chargePerCall": q.ChargePerCall,
-		"multiplier": q.Multiplier, "enabled": q.Enabled, "note": q.Note, "updatedAt": q.UpdatedAt,
+		"multiplier": q.Multiplier, "enabled": q.Enabled, "expiresAt": q.ExpiresAt,
+		"note": q.Note, "updatedAt": q.UpdatedAt,
 	}})
 	if err != nil {
 		var we mongo.WriteException
@@ -489,6 +490,45 @@ func (s *Store) AdjustQuota(ctx context.Context, id any, delta float64) (float64
 			bson.M{"$set": bson.M{"status": domain.QuotaStatusOK, "statusReason": ""}})
 	}
 	return q.Remaining, nil
+}
+
+// ClearReserved releases a leaked in-flight reservation back to remaining and
+// resets reserved to 0 (same accounting as a normal Release). It returns the
+// amount that was cleared. Useful when a crash/restart leaves a quota stuck in
+// "reserved" with no request left to settle it.
+func (s *Store) ClearReserved(ctx context.Context, id any) (float64, error) {
+	oid, err := objID(id)
+	if err != nil {
+		return 0, err
+	}
+	// Pipeline update so remaining += reserved and reserved = 0 happen atomically.
+	pipeline := mongo.Pipeline{
+		bson.D{{Key: "$set", Value: bson.M{
+			"remaining": bson.M{"$add": bson.A{"$remaining", "$reserved"}},
+			"reserved":  float64(0),
+			"updatedAt": now(),
+		}}},
+	}
+	res := s.DB.Quotas.FindOneAndUpdate(
+		ctx,
+		bson.M{"_id": oid},
+		pipeline,
+		options.FindOneAndUpdate().SetReturnDocument(options.Before),
+	)
+	if err := res.Err(); err != nil {
+		return 0, err
+	}
+	var before domain.Quota
+	if err := res.Decode(&before); err != nil {
+		return 0, err
+	}
+	// Releasing quota above zero recovers an "insufficient" quota.
+	if before.Remaining+before.Reserved > 0 && before.Status == domain.QuotaStatusInsufficient {
+		_, _ = s.DB.Quotas.UpdateOne(ctx,
+			bson.M{"_id": oid},
+			bson.M{"$set": bson.M{"status": domain.QuotaStatusOK, "statusReason": ""}})
+	}
+	return before.Reserved, nil
 }
 
 func (s *Store) DeleteQuota(ctx context.Context, id any) error {

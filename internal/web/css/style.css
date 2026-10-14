@@ -62,7 +62,7 @@ a { color: var(--accent); text-decoration: none; }
 .sidebar nav a:hover { color: var(--text); background: var(--bg3); }
 .sidebar nav a.active { color: var(--accent); border-left-color: var(--accent); background: var(--bg3); }
 .sidebar-foot { padding: 16px; border-top: 1px solid var(--border); }
-.content { flex: 1; padding: 26px 30px; max-width: 1200px; }
+.content { flex: 1; min-width: 0; padding: 26px 30px; }
 
 /* ---------- common ---------- */
 .page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
@@ -89,6 +89,8 @@ a { color: var(--accent); text-decoration: none; }
 .muted { color: var(--muted); }
 .error-text { color: var(--red); }
 .ok-text { color: var(--green); }
+.red { color: var(--red); }
+.amber { color: var(--amber); }
 
 /* ---------- usage help ---------- */
 .help summary {
@@ -147,6 +149,15 @@ input, select, textarea {
 textarea { min-height: 60px; font-family: monospace; }
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 .form-hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+/* date/time picker: keep the native calendar icon visible on the dark theme
+   (color-scheme:dark renders it light) and make it larger + easier to hit. */
+input[type="datetime-local"] { color-scheme: dark; }
+input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  width: 20px; height: 20px; padding: 2px;
+  cursor: pointer; opacity: .9;
+}
+input[type="datetime-local"]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
 
 #modal-root .overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,.6);

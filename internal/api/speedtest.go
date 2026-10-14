@@ -24,7 +24,28 @@ const (
 	speedTestTimeout   = 30 * time.Second
 	speedTestMaxTokens = 8
 	lightProbeEndpoint = "/models"
+	// probeInterval is the minimum gap between successive probe requests. It
+	// spaces out the burst so upstream providers don't flag it as abusive
+	// high-frequency traffic and start blocking requests.
+	probeInterval = 300 * time.Millisecond
 )
+
+// waitProbeGap blocks until at least probeInterval has elapsed since the
+// previous probe request, then records the current time as the latest request.
+// The wait is abortable via ctx.
+func waitProbeGap(ctx context.Context, last *time.Time) {
+	now := time.Now()
+	if !last.IsZero() {
+		if d := probeInterval - now.Sub(*last); d > 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(d):
+			}
+			now = time.Now()
+		}
+	}
+	*last = now
+}
 
 func sortedCandidates(vm *domain.VirtualModel) []domain.Candidate {
 	cands := make([]domain.Candidate, len(vm.Candidates))
@@ -74,6 +95,7 @@ func (g *Gateway) SpeedTest(ctx context.Context, idHex string) ([]speedResult, e
 	})
 
 	results := make([]speedResult, 0, len(cands))
+	var lastReq time.Time
 	for _, c := range cands {
 		res := speedResult{ChannelID: c.ChannelID.Hex(), Model: c.Model, Priority: c.Priority}
 		ch, key, reason := g.speedPrep(ctx, c)
@@ -111,6 +133,7 @@ func (g *Gateway) SpeedTest(ctx context.Context, idHex string) ([]speedResult, e
 			continue
 		}
 
+		waitProbeGap(ctx, &lastReq)
 		start := time.Now()
 		callCtx, cancel := context.WithTimeout(ctx, speedTestTimeout)
 		resp, err := g.up.Do(callCtx, ch, key, "/chat/completions", body)
@@ -176,6 +199,7 @@ func (g *Gateway) LightProbe(ctx context.Context, idHex string) ([]speedResult, 
 	cands := sortedCandidates(vm)
 
 	results := make([]speedResult, 0, len(cands))
+	var lastReq time.Time
 	for _, c := range cands {
 		res := speedResult{ChannelID: c.ChannelID.Hex(), Model: c.Model, Priority: c.Priority}
 		ch, key, reason := g.speedPrep(ctx, c)
@@ -186,6 +210,7 @@ func (g *Gateway) LightProbe(ctx context.Context, idHex string) ([]speedResult, 
 		}
 		res.ChannelName = ch.Name
 
+		waitProbeGap(ctx, &lastReq)
 		start := time.Now()
 		callCtx, cancel := context.WithTimeout(ctx, speedTestTimeout)
 		resp, err := g.up.Get(callCtx, ch, key, lightProbeEndpoint)

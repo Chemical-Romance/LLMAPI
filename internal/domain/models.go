@@ -81,9 +81,16 @@ type Quota struct {
 	Status        string        `bson:"status,omitempty" json:"status,omitempty"`             // ok | insufficient | unavailable (routing only picks ok)
 	StatusReason  string        `bson:"statusReason,omitempty" json:"statusReason,omitempty"` // last failure reason
 	StatusAt      time.Time     `bson:"statusAt,omitempty" json:"statusAt,omitempty"`         // when status was last set
+	ExpiresAt     *time.Time    `bson:"expiresAt,omitempty" json:"expiresAt,omitempty"`       // optional validity deadline; nil = never expires
 	Note          string        `bson:"note,omitempty" json:"note"`
 	CreatedAt     time.Time     `bson:"createdAt" json:"createdAt"`
 	UpdatedAt     time.Time     `bson:"updatedAt" json:"updatedAt"`
+}
+
+// IsExpired reports whether the quota has a validity deadline that has passed.
+// A nil ExpiresAt means the quota never expires.
+func (q Quota) IsExpired() bool {
+	return q.ExpiresAt != nil && !q.ExpiresAt.After(time.Now())
 }
 
 // Quota runtime health status. Routing only picks "ok" quotas; "" is treated
@@ -148,7 +155,7 @@ type RequestLog struct {
 	UserName         string        `bson:"userName,omitempty" json:"userName,omitempty"` // denormalized for display
 	TokenID          bson.ObjectID `bson:"tokenId" json:"tokenId"`
 	TokenName        string        `bson:"tokenName,omitempty" json:"tokenName,omitempty"` // denormalized for display
-	Endpoint         string        `bson:"endpoint" json:"endpoint"`                        // /v1/chat/completions | /v1/images/generations
+	Endpoint         string        `bson:"endpoint" json:"endpoint"`                       // /v1/chat/completions | /v1/images/generations
 	VirtualModel     string        `bson:"virtualModel" json:"virtualModel"`
 	ChannelID        bson.ObjectID `bson:"channelId,omitempty" json:"channelId"` // actually used channel
 	ChannelName      string        `bson:"channelName,omitempty" json:"channelName"`

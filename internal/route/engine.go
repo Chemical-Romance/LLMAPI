@@ -173,6 +173,10 @@ func (e *Engine) tryCandidate(ctx context.Context, c domain.Candidate, maxTokens
 		fail := AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "quota disabled"}
 		return nil, &fail
 	}
+	if quota.IsExpired() {
+		fail := AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "额度已过期"}
+		return nil, &fail
+	}
 	// Status gate: only "ok" quotas are routable. An "unavailable" quota is
 	// retried half-open once the cooldown window has passed since statusAt.
 	if quota.Status == domain.QuotaStatusUnavailable {

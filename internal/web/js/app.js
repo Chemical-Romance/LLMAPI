@@ -28,6 +28,18 @@
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   };
 
+  // toLocalInput converts an ISO timestamp to the "YYYY-MM-DDTHH:mm" string
+  // expected by <input type="datetime-local"> (in the browser's local time).
+  const toLocalInput = (iso) => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    const p = (x) => String(x).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
+
+  const isExpired = (iso) => !!iso && new Date(iso).getTime() <= Date.now();
+
   async function api(path, opts = {}) {
     const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
     if (state.token) headers["Authorization"] = "Bearer " + state.token;
@@ -310,10 +322,16 @@
   };
   const statusBadge = (q) => {
     if (!q.enabled) return '<span class="badge bad">停用</span>';
+    if (isExpired(q.expiresAt)) return '<span class="badge bad">已过期</span>';
     const st = q.status || "ok";
     if (st === "unavailable") return `<span class="badge bad" title="${esc(q.statusReason || "")}">不可用</span>`;
     if (st === "insufficient") return '<span class="badge amber">额度不足</span>';
     return '<span class="badge ok">正常</span>';
+  };
+
+  const validCell = (q) => {
+    if (!q.expiresAt) return '<span class="muted">永久</span>';
+    return `<span class="${isExpired(q.expiresAt) ? "red" : ""}">${fmtTime(q.expiresAt)}</span>`;
   };
 
   async function quotas(view) {
@@ -341,7 +359,7 @@
         <span class="muted">预扣中：<b>${fmt(resvSum)}</b></span>
       </div>
       <div class="card">
-        <table><tr><th>类型</th><th>渠道</th><th>模型</th><th>模式</th><th>剩余</th><th>预扣中</th><th>单次/张消耗</th><th>系数</th><th>状态</th><th></th></tr>
+        <table><tr><th>类型</th><th>渠道</th><th>模型</th><th>模式</th><th>剩余</th><th>预扣中</th><th>单次/张消耗</th><th>系数</th><th>有效期</th><th>状态</th><th></th></tr>
         ${shown.map((q) => `<tr>
           <td>${typeBadge(q.type)}</td>
           <td>${esc(chName(q.channelId))}</td><td><b>${esc(q.model)}</b></td>
@@ -349,13 +367,15 @@
           <td class="${q.remaining <= 0 ? "red" : ""}" style="${q.remaining < 10000 && q.mode === "token" ? "color:var(--amber)" : ""}">${fmt(q.remaining)}</td>
           <td class="muted">${fmt(q.reserved)}</td>
           <td>${q.chargePerCall || 1}</td><td>${q.multiplier || 1}</td>
+          <td>${validCell(q)}</td>
           <td>${statusBadge(q)}</td>
           <td class="actions">
+            ${q.reserved > 0 ? `<button class="btn small" data-clearresv="${q.id}" data-name="${esc(chName(q.channelId))}/${esc(q.model)}" data-resv="${q.reserved}" title="把预扣中的额度退回剩余（用于清理泄漏的预扣）">清理预扣</button>` : ""}
             ${q.status && q.status !== "ok" ? `<button class="btn small" data-resetst="${q.id}" title="手动恢复为正常状态">恢复</button>` : ""}
             <button class="btn small" data-adjust="${q.id}">调整</button>
             <button class="btn small" data-edit="${q.id}">编辑</button>
             <button class="btn small danger" data-del="${q.id}" data-name="${esc(chName(q.channelId))}/${esc(q.model)}">删除</button>
-          </td></tr>`).join("") || '<tr><td colspan="10" class="muted">暂无额度记录</td></tr>'}
+          </td></tr>`).join("") || '<tr><td colspan="11" class="muted">暂无额度记录</td></tr>'}
         </table>
       </div>`;
 
@@ -370,6 +390,11 @@
       toast("已删除", "var(--red)"); quotas(view);
     }));
     view.querySelectorAll("[data-adjust]").forEach((b) => (b.onclick = () => adjustModal(b.dataset.adjust)));
+    view.querySelectorAll("[data-clearresv]").forEach((b) => (b.onclick = async () => {
+      if (!confirm(`清理「${b.dataset.name}」预扣中的 ${fmt(Number(b.dataset.resv))} 额度并退回剩余？`)) return;
+      const r = await api(`/api/admin/quotas/${b.dataset.clearresv}/clear-reserved`, { method: "POST" });
+      toast(`已清理预扣 ${fmt(r.cleared)}，退回剩余`); quotas(view);
+    }));
     view.querySelectorAll("[data-resetst]").forEach((b) => (b.onclick = async () => {
       await api(`/api/admin/quotas/${b.dataset.resetst}/reset-status`, { method: "POST" });
       toast("已恢复为正常"); quotas(view);
@@ -406,7 +431,8 @@
           <div><label>状态</label><select name="enabled"><option value="true" ${src.enabled !== false ? "selected" : ""}>启用</option><option value="false" ${src.enabled === false ? "selected" : ""}>停用</option></select></div>
         </div>
         <div class="form-row">
-          <div style="flex:1"><label>备注</label><input name="note" value="${esc(src.note || "")}" /></div>
+          <div><label>有效期（留空为永久）</label><input name="expiresAt" type="datetime-local" value="${toLocalInput(src.expiresAt)}" /></div>
+          <div><label>备注</label><input name="note" value="${esc(src.note || "")}" /></div>
         </div>
       </form>`);
 
@@ -420,6 +446,7 @@
         channelId: f.get("channelId"), model: f.get("model"), type: f.get("type"), mode: f.get("mode"),
         remaining: Number(f.get("remaining")) || 0, chargePerCall: Number(f.get("chargePerCall")) || 1,
         multiplier: Number(f.get("multiplier")) || 1, enabled: f.get("enabled") === "true", note: f.get("note"),
+        expiresAt: f.get("expiresAt") ? new Date(f.get("expiresAt")).toISOString() : null,
       };
       await api(isEdit ? `/api/admin/quotas/${id}` : "/api/admin/quotas", { method: isEdit ? "PUT" : "POST", body: JSON.stringify(req) });
       closeModal(); toast("已保存"); quotas(viewRef());
@@ -466,8 +493,8 @@
               ${pr ? `<span class="muted">· 轻测于 ${fmtTime(pr.at)}</span>` : ""}
               ${sp ? `<span class="muted">· 测速于 ${fmtTime(sp.at)}</span>` : ""}
             </div>
-            <div><button class="btn small" data-probe="${vm.id}" data-name="${esc(vm.name)}" title="GET /models 探测接口连通性，不消耗 token">${pr ? "重新轻测" : "轻测"}</button>
-            <button class="btn small" data-speedtest="${vm.id}" data-name="${esc(vm.name)}" title="真实小请求（max_tokens=8），按量结算额度">${sp ? "重新测速" : "测速"}</button>
+            <div><button class="btn small" data-probe="${vm.id}" data-name="${esc(vm.name)}" title="GET /models 探测接口连通性，不消耗 token">轻测</button>
+            <button class="btn small" data-speedtest="${vm.id}" data-name="${esc(vm.name)}" title="真实小请求（max_tokens=8），按量结算额度">测速</button>
             <button class="btn small" data-edit="${vm.id}">编辑</button>
             <button class="btn small danger" data-del="${vm.id}" data-name="${esc(vm.name)}">删除</button></div>
           </div>

@@ -189,6 +189,7 @@ func (a *Admin) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/admin/quotas/{id}", protect(a.handleDeleteQuota))
 	mux.HandleFunc("POST /api/admin/quotas/{id}/adjust", protect(a.handleAdjustQuota))
 	mux.HandleFunc("POST /api/admin/quotas/{id}/reset-status", protect(a.handleResetQuotaStatus))
+	mux.HandleFunc("POST /api/admin/quotas/{id}/clear-reserved", protect(a.handleClearReservedQuota))
 
 	mux.HandleFunc("GET /api/admin/virtual-models", protect(a.handleListVirtualModels))
 	mux.HandleFunc("POST /api/admin/virtual-models", protect(a.handleCreateVirtualModel))
@@ -554,6 +555,17 @@ func (a *Admin) handleResetQuotaStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleClearReservedQuota releases a leaked in-flight reservation back to
+// remaining and zeroes the "reserved" counter.
+func (a *Admin) handleClearReservedQuota(w http.ResponseWriter, r *http.Request) {
+	cleared, err := a.st.ClearReserved(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cleared": cleared})
 }
 
 // ---------- virtual models ----------

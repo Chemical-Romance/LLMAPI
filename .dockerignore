@@ -1,0 +1,13 @@
+# 构建上下文排除：不进镜像的内容
+.git
+.env
+.env.*
+!.env.example
+/bin/
+/dist/
+/server
+*.test
+*.out
+.idea/
+.vscode/
+.DS_Store
