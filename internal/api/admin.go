@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -727,8 +728,17 @@ func (a *Admin) handleCreateUserToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad user id")
 		return
 	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeErr(w, http.StatusBadRequest, "name is required")
+		return
+	}
 	tok, plain, err := a.st.CreateToken(r.Context(), store.NewToken{UserID: oid, Name: req.Name})
 	if err != nil {
+		if errors.Is(err, store.ErrNameConflict) {
+			writeErr(w, http.StatusConflict, "该用户下已存在同名令牌")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

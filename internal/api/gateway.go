@@ -87,33 +87,34 @@ func (g *Gateway) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/images/generations", g.handleImages)
 }
 
-// authenticate validates the caller's Bearer API key and returns its token.
-func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) (*domain.Token, bool) {
+// authenticate validates the caller's Bearer API key and returns its token
+// together with the owning user's display name (for request logs).
+func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) (*domain.Token, string, bool) {
 	key := bearerToken(r)
 	if key == "" {
 		unauthorized(w, "missing API key. use Authorization: Bearer <your-key>")
-		return nil, false
+		return nil, "", false
 	}
 	tok, err := g.st.GetTokenByKey(r.Context(), key)
 	if err != nil {
 		unauthorized(w, "invalid API key")
-		return nil, false
+		return nil, "", false
 	}
 	if !tok.Enabled {
 		unauthorized(w, "API key is disabled")
-		return nil, false
+		return nil, "", false
 	}
 	u, err := g.st.GetUser(r.Context(), tok.UserID)
 	if err != nil || u == nil || !u.Enabled {
 		unauthorized(w, "user is disabled")
-		return nil, false
+		return nil, "", false
 	}
 	g.st.TouchToken(r.Context(), tok.ID)
-	return tok, true
+	return tok, u.Name, true
 }
 
 func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
-	if _, ok := g.authenticate(w, r); !ok {
+	if _, _, ok := g.authenticate(w, r); !ok {
 		return
 	}
 	vms, err := g.st.ListVirtualModels(r.Context())
@@ -134,7 +135,7 @@ func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
 // ---------- chat completions ----------
 
 func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
-	tok, ok := g.authenticate(w, r)
+	tok, userName, ok := g.authenticate(w, r)
 	if !ok {
 		return
 	}
@@ -175,7 +176,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 			break
 		}
-		err = g.tryChat(ctx, w, tok, meta, body, thinking, tgt)
+		err = g.tryChat(ctx, w, tok, userName, meta, body, thinking, tgt)
 		if err == nil {
 			_ = g.st.SetQuotaStatus(context.WithoutCancel(ctx), tgt.QuotaID, domain.QuotaStatusOK, "")
 			return
@@ -198,7 +199,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if clientGone {
 		g.logs.submit(&domain.RequestLog{
-			UserID: tok.UserID, TokenID: tok.ID, Endpoint: "/v1/chat/completions",
+			UserID: tok.UserID, UserName: userName, TokenID: tok.ID, TokenName: tok.Name, Endpoint: "/v1/chat/completions",
 			VirtualModel: meta.Model, Thinking: thinking, Status: "error", Error: "client disconnected",
 			LatencyMs: time.Since(start).Milliseconds(), CreatedAt: time.Now().UTC(),
 		})
@@ -210,7 +211,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	finalErr := fmt.Sprintf("no available channel could serve this request: %s", lastErrStr)
 	g.logs.submit(&domain.RequestLog{
-		UserID: tok.UserID, TokenID: tok.ID, Endpoint: "/v1/chat/completions",
+		UserID: tok.UserID, UserName: userName, TokenID: tok.ID, TokenName: tok.Name, Endpoint: "/v1/chat/completions",
 		VirtualModel: meta.Model, Thinking: thinking, Status: "error", Error: finalErr,
 		LatencyMs: time.Since(start).Milliseconds(), CreatedAt: time.Now().UTC(),
 	})
@@ -221,7 +222,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 // tryChat performs one upstream attempt. On success it writes the response and
 // returns nil. A non-nil error means nothing was written to the client yet, so
 // the caller may safely fail over to another candidate.
-func (g *Gateway) tryChat(ctx context.Context, w http.ResponseWriter, tok *domain.Token, meta chatMeta, body []byte, thinking string, tgt *route.Target) error {
+func (g *Gateway) tryChat(ctx context.Context, w http.ResponseWriter, tok *domain.Token, userName string, meta chatMeta, body []byte, thinking string, tgt *route.Target) error {
 	start := time.Now()
 	reqBody, err := upstream.RewriteModel(body, tgt.ActualModel)
 	if err != nil {
@@ -245,7 +246,7 @@ func (g *Gateway) tryChat(ctx context.Context, w http.ResponseWriter, tok *domai
 	}
 
 	if meta.Stream {
-		return g.streamChat(ctx, w, resp, tok, tgt, body, thinking, meta.Model)
+		return g.streamChat(ctx, w, resp, tok, userName, tgt, body, thinking, meta.Model)
 	}
 
 	out, err := io.ReadAll(resp.Body)
@@ -257,7 +258,7 @@ func (g *Gateway) tryChat(ctx context.Context, w http.ResponseWriter, tok *domai
 	actual, pt, ct, tt := g.settleChat(tgt, usage, promptEst, "")
 	// WithoutCancel: settle even if the client disconnected after the upstream
 	// response arrived, so the reservation never leaks.
-	g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/chat/completions", meta.Model, tgt.ActualModel, thinking, pt, ct, tt, 0, "success", "", time.Since(start).Milliseconds())
+	g.settle(context.WithoutCancel(ctx), tgt, actual, tok, userName, "/v1/chat/completions", meta.Model, tgt.ActualModel, thinking, pt, ct, tt, 0, "success", "", time.Since(start).Milliseconds())
 
 	copyHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
@@ -268,7 +269,7 @@ func (g *Gateway) tryChat(ctx context.Context, w http.ResponseWriter, tok *domai
 
 // streamChat forwards an SSE stream verbatim and settles quota from the final
 // usage chunk (or a heuristic estimate).
-func (g *Gateway) streamChat(ctx context.Context, w http.ResponseWriter, resp *http.Response, tok *domain.Token, tgt *route.Target, body []byte, thinking string, virtualModel string) error {
+func (g *Gateway) streamChat(ctx context.Context, w http.ResponseWriter, resp *http.Response, tok *domain.Token, userName string, tgt *route.Target, body []byte, thinking string, virtualModel string) error {
 	flusher, _ := w.(http.Flusher)
 	reader := bufio.NewReader(resp.Body)
 	var usage upstream.Usage
@@ -284,7 +285,7 @@ func (g *Gateway) streamChat(ctx context.Context, w http.ResponseWriter, resp *h
 		}
 		promptEst := upstream.EstimatePromptTokens(body)
 		actual, pt, ct, tt := g.settleChat(tgt, usage, promptEst, completionText.String())
-		g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/chat/completions", virtualModel, tgt.ActualModel, thinking, pt, ct, tt, 0, "success", "", time.Since(start).Milliseconds())
+		g.settle(context.WithoutCancel(ctx), tgt, actual, tok, userName, "/v1/chat/completions", virtualModel, tgt.ActualModel, thinking, pt, ct, tt, 0, "success", "", time.Since(start).Milliseconds())
 	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -362,15 +363,17 @@ func (g *Gateway) settleChat(tgt *route.Target, usage upstream.Usage, promptEst 
 }
 
 // settle persists consumption: confirm the reservation and write a request log.
-func (g *Gateway) settle(ctx context.Context, tgt *route.Target, actual float64, tok *domain.Token, endpoint, virtualModel, actualModel, thinking string, pt, ct, tt int64, images int, status, errMsg string, latencyMs int64) {
+func (g *Gateway) settle(ctx context.Context, tgt *route.Target, actual float64, tok *domain.Token, userName, endpoint, virtualModel, actualModel, thinking string, pt, ct, tt int64, images int, status, errMsg string, latencyMs int64) {
 	// Billing must not be canceled by a client disconnect.
 	if err := g.st.Confirm(context.WithoutCancel(ctx), tgt.QuotaID, tgt.Reserved, actual); err != nil {
 		log.Printf("[settle] confirm failed for quota %s: %v", tgt.QuotaID.Hex(), err)
 	}
 	now := time.Now().UTC()
 	g.logs.submit(&domain.RequestLog{
-		UserID: tok.UserID, TokenID: tok.ID, Endpoint: endpoint,
-		VirtualModel:     virtualModel,
+		UserID: tok.UserID, UserName: userName, Endpoint: endpoint,
+		TokenID:         tok.ID,
+		TokenName:       tok.Name,
+		VirtualModel:    virtualModel,
 		ChannelID:        tgt.Channel.ID,
 		ChannelName:      tgt.Channel.Name,
 		ActualModel:      actualModel,
@@ -391,7 +394,7 @@ func (g *Gateway) settle(ctx context.Context, tgt *route.Target, actual float64,
 // ---------- images ----------
 
 func (g *Gateway) handleImages(w http.ResponseWriter, r *http.Request) {
-	tok, ok := g.authenticate(w, r)
+	tok, userName, ok := g.authenticate(w, r)
 	if !ok {
 		return
 	}
@@ -431,7 +434,7 @@ func (g *Gateway) handleImages(w http.ResponseWriter, r *http.Request) {
 			}
 			break
 		}
-		err = g.tryImages(ctx, w, tok, body, meta, tgt)
+		err = g.tryImages(ctx, w, tok, userName, body, meta, tgt)
 		if err == nil {
 			_ = g.st.SetQuotaStatus(context.WithoutCancel(ctx), tgt.QuotaID, domain.QuotaStatusOK, "")
 			return
@@ -454,7 +457,7 @@ func (g *Gateway) handleImages(w http.ResponseWriter, r *http.Request) {
 	}
 	if clientGone {
 		g.logs.submit(&domain.RequestLog{
-			UserID: tok.UserID, TokenID: tok.ID, Endpoint: "/v1/images/generations",
+			UserID: tok.UserID, UserName: userName, TokenID: tok.ID, TokenName: tok.Name, Endpoint: "/v1/images/generations",
 			VirtualModel: meta.Model, Status: "error", Error: "client disconnected",
 			LatencyMs: time.Since(start).Milliseconds(), CreatedAt: time.Now().UTC(),
 		})
@@ -466,14 +469,14 @@ func (g *Gateway) handleImages(w http.ResponseWriter, r *http.Request) {
 	}
 	finalErr := fmt.Sprintf("no available channel could serve this request: %s", lastErrStr)
 	g.logs.submit(&domain.RequestLog{
-		UserID: tok.UserID, TokenID: tok.ID, Endpoint: "/v1/images/generations",
+		UserID: tok.UserID, UserName: userName, TokenID: tok.ID, TokenName: tok.Name, Endpoint: "/v1/images/generations",
 		VirtualModel: meta.Model, Status: "error", Error: finalErr,
 		LatencyMs: time.Since(start).Milliseconds(), CreatedAt: time.Now().UTC(),
 	})
 	openAIError(w, http.StatusServiceUnavailable, "api_error", "no_channel_available", finalErr)
 }
 
-func (g *Gateway) tryImages(ctx context.Context, w http.ResponseWriter, tok *domain.Token, body []byte, meta imagesMeta, tgt *route.Target) error {
+func (g *Gateway) tryImages(ctx context.Context, w http.ResponseWriter, tok *domain.Token, userName string, body []byte, meta imagesMeta, tgt *route.Target) error {
 	start := time.Now()
 	reqBody, err := upstream.RewriteModel(body, tgt.ActualModel)
 	if err != nil {
@@ -509,7 +512,7 @@ func (g *Gateway) tryImages(ctx context.Context, w http.ResponseWriter, tok *dom
 	}
 	// WithoutCancel: settle even if the client disconnected, so the
 	// reservation never leaks.
-	g.settle(context.WithoutCancel(ctx), tgt, actual, tok, "/v1/images/generations", meta.Model, tgt.ActualModel, "", 0, 0, 0, images, "success", "", time.Since(start).Milliseconds())
+	g.settle(context.WithoutCancel(ctx), tgt, actual, tok, userName, "/v1/images/generations", meta.Model, tgt.ActualModel, "", 0, 0, 0, images, "success", "", time.Since(start).Milliseconds())
 
 	copyHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Length", strconv.Itoa(len(out)))

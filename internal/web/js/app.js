@@ -39,7 +39,12 @@
       throw new Error("登录已过期");
     }
     if (!res.ok) {
-      const msg = body && (body.error || body.message) ? JSON.stringify(body.error || body.message) : `HTTP ${res.status}`;
+      let msg = `HTTP ${res.status}`;
+      if (body) {
+        if (typeof body.error === "string") msg = body.error;
+        else if (body.error && body.error.message) msg = body.error.message;
+        else if (typeof body.message === "string") msg = body.message;
+      }
       throw new Error(msg);
     }
     return body;
@@ -774,10 +779,24 @@ print(resp.choices[0].message.content)</pre>
     const m = openModal(`为用户 ${userName} 创建令牌`, `
       <form id="token-form"><label>令牌名称</label><input name="name" placeholder="如 production-web" required /></form>
       <div class="key-copy hidden" id="key-show"></div>
-      <div class="form-hint">创建后请立即复制并妥善保存密钥，密钥仅显示一次。</div>`);
+      <div class="form-hint" id="token-hint">创建后请立即复制并妥善保存密钥，密钥仅显示一次。</div>`);
     m.root.querySelector("[data-submit]").onclick = async () => {
       const f = new FormData($("#token-form"));
-      const r = await api(`/api/admin/users/${userId}/tokens`, { method: "POST", body: JSON.stringify({ name: f.get("name") }) });
+      const name = String(f.get("name") || "").trim();
+      if (!name) { toast("请输入令牌名称", "var(--red)"); return; }
+      let r;
+      try {
+        r = await api(`/api/admin/users/${userId}/tokens`, { method: "POST", body: JSON.stringify({ name }) });
+      } catch (e) {
+        toast(e.message, "var(--red)");
+        return;
+      }
+      // creation succeeded: swap footer to a single close button and reveal the key
+      const actions = m.root.querySelector(".modal-actions");
+      actions.innerHTML = `<button class="btn" data-close>关闭</button>`;
+      actions.querySelector("[data-close]").addEventListener("click", m.close);
+      m.root.querySelector("#token-form").classList.add("hidden");
+      m.root.querySelector("#token-hint").classList.add("hidden");
       const k = m.root.querySelector("#key-show");
       k.classList.remove("hidden");
       k.innerHTML = `密钥：<b>${esc(r.key)}</b>`;
@@ -810,9 +829,11 @@ print(resp.choices[0].message.content)</pre>
         <button class="btn" id="f-reset">重置</button>
       </div>
       <div class="card">
-        <table><tr><th>时间</th><th>虚拟模型</th><th>渠道</th><th>上游模型</th><th>模式</th><th>思考</th><th>Token</th><th>消耗</th><th>状态</th></tr>
+        <table><tr><th>时间</th><th>用户</th><th>令牌</th><th>虚拟模型</th><th>渠道</th><th>上游模型</th><th>模式</th><th>思考</th><th>Token</th><th>消耗</th><th>状态</th></tr>
         ${r.items.map((l) => `<tr>
           <td class="muted">${fmtTime(l.createdAt)}</td>
+          <td>${esc(l.userName || "-")}</td>
+          <td>${esc(l.tokenName || "-")}</td>
           <td><b>${esc(l.virtualModel)}</b></td>
           <td>${esc(l.channelName || l.channelId)} </td>
           <td class="muted">${esc(l.actualModel || "")}${l.images ? ` <span class="badge blue">${l.images}图</span>` : ""}</td>
@@ -821,7 +842,7 @@ print(resp.choices[0].message.content)</pre>
           <td>${fmt(l.totalTokens)}</td>
           <td>${fmt(l.charge)}</td>
           <td>${l.status === "success" ? '<span class="badge ok">成功</span>' : `<span class="badge bad">失败</span>`}</td></tr>
-          ${l.error ? `<tr><td colspan="9" class="error-text" style="font-size:12px">${esc(l.error)}</td></tr>` : ""}`).join("") || '<tr><td colspan="9" class="muted">暂无日志</td></tr>'}
+          ${l.error ? `<tr><td colspan="11" class="error-text" style="font-size:12px">${esc(l.error)}</td></tr>` : ""}`).join("") || '<tr><td colspan="11" class="muted">暂无日志</td></tr>'}
         </table>
         <div class="pagination">
           <button class="btn small" id="prev-page" ${logF.page <= 1 ? "disabled" : ""}>上一页</button>

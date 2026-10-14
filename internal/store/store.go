@@ -133,7 +133,15 @@ type NewToken struct {
 }
 
 // CreateToken stores the token hash and returns the plaintext key (shown once).
+// Token names must be unique within one user.
 func (s *Store) CreateToken(ctx context.Context, n NewToken) (*domain.Token, string, error) {
+	exists, err := s.DB.Tokens.CountDocuments(ctx, bson.M{"userId": n.UserID, "name": n.Name})
+	if err != nil {
+		return nil, "", err
+	}
+	if exists > 0 {
+		return nil, "", ErrNameConflict
+	}
 	plain := RandomKey()
 	t := &domain.Token{
 		ID:        bson.NewObjectID(),

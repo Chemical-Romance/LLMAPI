@@ -145,8 +145,10 @@ type VirtualModel struct {
 type RequestLog struct {
 	ID               bson.ObjectID `bson:"_id,omitempty" json:"id"`
 	UserID           bson.ObjectID `bson:"userId" json:"userId"`
+	UserName         string        `bson:"userName,omitempty" json:"userName,omitempty"` // denormalized for display
 	TokenID          bson.ObjectID `bson:"tokenId" json:"tokenId"`
-	Endpoint         string        `bson:"endpoint" json:"endpoint"` // /v1/chat/completions | /v1/images/generations
+	TokenName        string        `bson:"tokenName,omitempty" json:"tokenName,omitempty"` // denormalized for display
+	Endpoint         string        `bson:"endpoint" json:"endpoint"`                        // /v1/chat/completions | /v1/images/generations
 	VirtualModel     string        `bson:"virtualModel" json:"virtualModel"`
 	ChannelID        bson.ObjectID `bson:"channelId,omitempty" json:"channelId"` // actually used channel
 	ChannelName      string        `bson:"channelName,omitempty" json:"channelName"`
