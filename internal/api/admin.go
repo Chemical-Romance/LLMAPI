@@ -190,6 +190,7 @@ func (a *Admin) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/quotas/{id}/adjust", protect(a.handleAdjustQuota))
 	mux.HandleFunc("POST /api/admin/quotas/{id}/reset-status", protect(a.handleResetQuotaStatus))
 	mux.HandleFunc("POST /api/admin/quotas/{id}/clear-reserved", protect(a.handleClearReservedQuota))
+	mux.HandleFunc("POST /api/admin/quotas/{id}/test", protect(a.handleTestQuota))
 
 	mux.HandleFunc("GET /api/admin/virtual-models", protect(a.handleListVirtualModels))
 	mux.HandleFunc("POST /api/admin/virtual-models", protect(a.handleCreateVirtualModel))
@@ -566,6 +567,23 @@ func (a *Admin) handleClearReservedQuota(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cleared": cleared})
+}
+
+// handleTestQuota runs a tiny real request against one channel+model quota and
+// reports whether it is usable, plus a per-step reason when it is not. The
+// result always returns HTTP 200 (unless the quota id is invalid) so the
+// console can show the full diagnostic instead of a generic error.
+func (a *Admin) handleTestQuota(w http.ResponseWriter, r *http.Request) {
+	if a.gw == nil {
+		writeErr(w, http.StatusServiceUnavailable, "gateway not ready")
+		return
+	}
+	res, err := a.gw.TestQuota(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // ---------- virtual models ----------

@@ -376,6 +376,7 @@
           <td class="actions">
             ${q.reserved > 0 ? `<button class="btn small" data-clearresv="${q.id}" data-name="${esc(chName(q.channelId))}/${esc(q.model)}" data-resv="${q.reserved}" title="把预扣中的额度退回剩余（用于清理泄漏的预扣）">清理预扣</button>` : ""}
             ${q.status && q.status !== "ok" ? `<button class="btn small" data-resetst="${q.id}" title="手动恢复为正常状态">恢复</button>` : ""}
+            <button class="btn small" data-test="${q.id}" data-name="${esc(chName(q.channelId))}/${esc(q.model)}" title="发送一个最小真实请求，检测该模型当前是否可用（按量计费）">测试</button>
             <button class="btn small" data-adjust="${q.id}">调整</button>
             <button class="btn small" data-edit="${q.id}">编辑</button>
             <button class="btn small danger" data-del="${q.id}" data-name="${esc(chName(q.channelId))}/${esc(q.model)}">删除</button>
@@ -403,6 +404,7 @@
       await api(`/api/admin/quotas/${b.dataset.resetst}/reset-status`, { method: "POST" });
       toast("已恢复为正常"); quotas(view);
     }));
+    view.querySelectorAll("[data-test]").forEach((b) => (b.onclick = () => quotaTestModal(b.dataset.test, b.dataset.name)));
   }
 
   function quotaModal(id, chs) {
@@ -470,6 +472,54 @@
       const r = await api(`/api/admin/quotas/${id}/adjust`, { method: "POST", body: JSON.stringify({ delta }) });
       closeModal(); toast(`调整完成，剩余 ${fmt(r.remaining)}`); quotas(viewRef());
     };
+  }
+
+  // quotaTestModal tests one channel×model quota with a tiny real request and
+  // shows the per-step diagnostic (channel / key / quota / upstream).
+  function quotaTestModal(id, name) {
+    const m = openModal(`测试模型 ${name}`, `
+      <div id="qt-body" class="muted">正在发送测试请求…</div>`,
+      { actionsHTML: `<button class="btn" data-close>关闭</button><button class="btn primary" id="qt-again">重新测试</button>` });
+    const run = () => {
+      const body = m.root.querySelector("#qt-body");
+      body.className = "muted";
+      body.innerHTML = "正在发送测试请求…";
+      const again = m.root.querySelector("#qt-again");
+      again.disabled = true;
+      api(`/api/admin/quotas/${id}/test`, { method: "POST" })
+        .then((r) => {
+          body.className = "";
+          body.innerHTML = renderQuotaTest(r);
+          toast(r.ok ? "模型可用" : "模型不可用", r.ok ? "var(--green)" : "var(--red)");
+          quotas(viewRef()); // keep the list's status badges in sync; modal stays open
+        })
+        .catch((e) => {
+          body.className = "error-text";
+          body.textContent = e.message || "测试失败";
+        })
+        .finally(() => { again.disabled = false; });
+    };
+    m.root.querySelector("#qt-again").onclick = run;
+    run();
+  }
+
+  function renderQuotaTest(r) {
+    const stepRow = (s) => `<div style="display:flex;gap:8px;align-items:flex-start;margin:6px 0">
+      <span class="badge ${s.ok ? "ok" : "bad"}">${s.ok ? "通过" : "失败"}</span>
+      <b style="min-width:56px">${esc(s.name)}</b>
+      <span class="muted" style="flex:1;word-break:break-all">${esc(s.message || "")}</span></div>`;
+    return `
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+        ${r.ok ? '<span class="badge ok">可用</span>' : '<span class="badge bad">不可用</span>'}
+        ${r.channelName ? `<span class="muted">渠道 ${esc(r.channelName)}</span>` : ""}
+        <span class="muted">模型 ${esc(r.model)}</span>
+        ${r.endpoint ? `<span class="muted">· ${esc(r.endpoint)}</span>` : ""}
+        ${r.latencyMs ? `<span class="muted">· ${r.latencyMs} ms</span>` : ""}
+        ${r.ok && r.tokens ? `<span class="muted">· ${fmt(r.tokens)} tk${r.charge ? " · 扣 " + fmt(r.charge) : ""}</span>` : ""}
+      </div>
+      ${(r.steps || []).map(stepRow).join("")}
+      <div class="form-hint" style="margin-top:10px">测试会发送一个最小真实请求，成功后按量扣减该额度。</div>
+      ${r.error ? `<div class="error-text" style="margin-top:10px;white-space:pre-wrap;word-break:break-all">${esc(r.error)}</div>` : ""}`;
   }
 
   /* ---------- virtual models ---------- */

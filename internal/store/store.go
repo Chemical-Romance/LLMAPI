@@ -401,6 +401,22 @@ func (s *Store) GetQuota(ctx context.Context, channelID any, model string) (*dom
 	return &q, nil
 }
 
+// GetQuotaByID loads a single quota by its own id.
+func (s *Store) GetQuotaByID(ctx context.Context, id any) (*domain.Quota, error) {
+	oid, err := objID(id)
+	if err != nil {
+		return nil, err
+	}
+	var q domain.Quota
+	if err := s.DB.Quotas.FindOne(ctx, bson.M{"_id": oid}).Decode(&q); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &q, nil
+}
+
 func (s *Store) CreateQuota(ctx context.Context, q *domain.Quota) (*domain.Quota, error) {
 	q.ID = bson.NewObjectID()
 	q.CreatedAt = now()
