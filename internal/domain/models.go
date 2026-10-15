@@ -78,16 +78,16 @@ type Quota struct {
 	ChargePerCall float64       `bson:"chargePerCall" json:"chargePerCall"` // extra charge per call/image for ModeCalls (default 1)
 	Multiplier    float64       `bson:"multiplier" json:"multiplier"`       // consumption coefficient for ModeToken (default 1)
 	Enabled       bool          `bson:"enabled" json:"enabled"`
-	Status        string        `bson:"status,omitempty" json:"status,omitempty"`             // ok | insufficient | unavailable (routing only picks ok)
+	Status        string        `bson:"status,omitempty" json:"status,omitempty"`             // ok | insufficient | unavailable | expired (routing only picks ok)
 	StatusReason  string        `bson:"statusReason,omitempty" json:"statusReason,omitempty"` // last failure reason
 	StatusAt      time.Time     `bson:"statusAt,omitempty" json:"statusAt,omitempty"`         // when status was last set
-	ExpiresAt     *time.Time    `bson:"expiresAt,omitempty" json:"expiresAt,omitempty"`       // optional validity deadline; nil = never expires
+	ExpiresAt     *time.Time    `bson:"expiresAt,omitempty" json:"expiresAt,omitempty"`       // 有效期/到期时间，空 = 永久有效
 	Note          string        `bson:"note,omitempty" json:"note"`
 	CreatedAt     time.Time     `bson:"createdAt" json:"createdAt"`
 	UpdatedAt     time.Time     `bson:"updatedAt" json:"updatedAt"`
 }
 
-// IsExpired reports whether the quota has a validity deadline that has passed.
+// IsExpired reports whether the quota's validity period has ended.
 // A nil ExpiresAt means the quota never expires.
 func (q Quota) IsExpired() bool {
 	return q.ExpiresAt != nil && !q.ExpiresAt.After(time.Now())
@@ -99,6 +99,7 @@ const (
 	QuotaStatusOK           = "ok"           // 正常
 	QuotaStatusInsufficient = "insufficient" // 额度不足
 	QuotaStatusUnavailable  = "unavailable"  // 不可用（上游失败）
+	QuotaStatusExpired      = "expired"      // 已失效（有效期到期）
 )
 
 // Candidate is one route entry: which channel+model to try, in priority order.

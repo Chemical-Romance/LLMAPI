@@ -112,6 +112,12 @@ func (g *Gateway) SpeedTest(ctx context.Context, idHex string) ([]speedResult, e
 			results = append(results, res)
 			continue
 		}
+		if quota.IsExpired() {
+			_ = g.st.SetQuotaStatus(context.WithoutCancel(ctx), quota.ID, domain.QuotaStatusExpired, "有效期已过")
+			res.Error = fmt.Sprintf("有效期已过（%s）", quota.ExpiresAt.Format("2006-01-02"))
+			results = append(results, res)
+			continue
+		}
 		need := route.ReserveNeed(quota, speedTestMaxTokens, 1, g.cfg.DefaultReserveTokens())
 		ok, err := g.st.Reserve(ctx, quota.ID, need)
 		if err != nil {

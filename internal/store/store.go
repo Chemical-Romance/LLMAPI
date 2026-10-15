@@ -423,26 +423,38 @@ func (s *Store) CreateQuota(ctx context.Context, q *domain.Quota) (*domain.Quota
 
 func (s *Store) UpdateQuota(ctx context.Context, q *domain.Quota) error {
 	q.UpdatedAt = now()
-	_, err := s.DB.Quotas.UpdateOne(ctx, bson.M{"_id": q.ID}, bson.M{"$set": bson.M{
+	set := bson.M{
 		"channelId": q.ChannelID, "model": q.Model,
 		"mode": q.Mode, "type": q.Type, "remaining": q.Remaining, "chargePerCall": q.ChargePerCall,
-		"multiplier": q.Multiplier, "enabled": q.Enabled, "expiresAt": q.ExpiresAt,
-		"note": q.Note, "updatedAt": q.UpdatedAt,
-	}})
-	if err != nil {
-		var we mongo.WriteException
-		if errors.As(err, &we) && len(we.WriteErrors) > 0 && we.WriteErrors[0].Code == 11000 {
-			return ErrNameConflict
-		}
-		return err
+		"multiplier": q.Multiplier, "enabled": q.Enabled, "note": q.Note, "updatedAt": q.UpdatedAt,
 	}
-	// Editing remaining above zero recovers an "insufficient" quota.
-	if q.Remaining > 0 {
+	update := bson.M{"$set": set}
+	if q.ExpiresAt != nil {
+		set["expiresAt"] = q.ExpiresAt
+	} else {
+		// "永久" clears any previously configured expiry
+		update["$unset"] = bson.M{"expiresAt": ""}
+	}
+	if _, err := s.DB.Quotas.UpdateOne(ctx, bson.M{"_id": q.ID}, update); err != nil {
+		return quotaUpdateErr(err)
+	}
+	// Editing remaining above zero (and a still-valid expiry) recovers
+	// an "insufficient" / "expired" quota.
+	if q.Remaining > 0 && !q.IsExpired() {
 		_, _ = s.DB.Quotas.UpdateOne(ctx,
-			bson.M{"_id": q.ID, "status": domain.QuotaStatusInsufficient},
+			bson.M{"_id": q.ID, "status": bson.M{"$in": bson.A{domain.QuotaStatusInsufficient, domain.QuotaStatusExpired}}},
 			bson.M{"$set": bson.M{"status": domain.QuotaStatusOK, "statusReason": ""}})
 	}
 	return nil
+}
+
+// quotaUpdateErr maps a Mongo duplicate-key write error to ErrNameConflict.
+func quotaUpdateErr(err error) error {
+	var we mongo.WriteException
+	if errors.As(err, &we) && len(we.WriteErrors) > 0 && we.WriteErrors[0].Code == 11000 {
+		return ErrNameConflict
+	}
+	return err
 }
 
 // AdjustQuota adds delta to remaining (positive or negative) and returns the new value.

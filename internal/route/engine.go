@@ -173,8 +173,14 @@ func (e *Engine) tryCandidate(ctx context.Context, c domain.Candidate, maxTokens
 		fail := AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "quota disabled"}
 		return nil, &fail
 	}
+	// Validity period: an expired quota is never routed to, and is marked
+	// "expired" so the console shows it as 已失效.
 	if quota.IsExpired() {
-		fail := AttemptError{ChannelName: ch.Name, Model: c.Model, Reason: "额度已过期"}
+		if quota.Status != domain.QuotaStatusExpired {
+			_ = e.store.SetQuotaStatus(ctx, quota.ID, domain.QuotaStatusExpired, "有效期已过")
+		}
+		fail := AttemptError{ChannelName: ch.Name, Model: c.Model,
+			Reason: fmt.Sprintf("有效期已过 (%s)", quota.ExpiresAt.Format("2006-01-02"))}
 		return nil, &fail
 	}
 	// Status gate: only "ok" quotas are routable. An "unavailable" quota is
@@ -198,6 +204,11 @@ func (e *Engine) tryCandidate(ctx context.Context, c domain.Candidate, maxTokens
 	}
 	if quota.Status == domain.QuotaStatusInsufficient {
 		// topped up outside adjust paths — recover
+		_ = e.store.SetQuotaStatus(ctx, quota.ID, domain.QuotaStatusOK, "")
+		quota.Status = domain.QuotaStatusOK
+	}
+	if quota.Status == domain.QuotaStatusExpired {
+		// expiry extended outside the admin edit path — recover
 		_ = e.store.SetQuotaStatus(ctx, quota.ID, domain.QuotaStatusOK, "")
 		quota.Status = domain.QuotaStatusOK
 	}

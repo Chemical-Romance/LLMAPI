@@ -28,8 +28,7 @@
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   };
 
-  // toLocalInput converts an ISO timestamp to the "YYYY-MM-DDTHH:mm" string
-  // expected by <input type="datetime-local"> (in the browser's local time).
+  // toLocalInput renders an ISO time as a value for <input type="datetime-local"> (local tz).
   const toLocalInput = (iso) => {
     if (!iso) return "";
     const d = new Date(iso);
@@ -38,7 +37,11 @@
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
   };
 
+  // isExpired reports whether an expiry timestamp has already passed.
   const isExpired = (iso) => !!iso && new Date(iso).getTime() <= Date.now();
+
+  // fmtExpiry renders a validity period for tables.
+  const fmtExpiry = (iso) => (iso ? fmtTime(iso) : "永久");
 
   async function api(path, opts = {}) {
     const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
@@ -322,7 +325,8 @@
   };
   const statusBadge = (q) => {
     if (!q.enabled) return '<span class="badge bad">停用</span>';
-    if (isExpired(q.expiresAt)) return '<span class="badge bad">已过期</span>';
+    if (isExpired(q.expiresAt) || q.status === "expired")
+      return `<span class="badge bad" title="有效期至 ${esc(fmtTime(q.expiresAt))}">已失效</span>`;
     const st = q.status || "ok";
     if (st === "unavailable") return `<span class="badge bad" title="${esc(q.statusReason || "")}">不可用</span>`;
     if (st === "insufficient") return '<span class="badge amber">额度不足</span>';
@@ -431,8 +435,8 @@
           <div><label>状态</label><select name="enabled"><option value="true" ${src.enabled !== false ? "selected" : ""}>启用</option><option value="false" ${src.enabled === false ? "selected" : ""}>停用</option></select></div>
         </div>
         <div class="form-row">
-          <div><label>有效期（留空为永久）</label><input name="expiresAt" type="datetime-local" value="${toLocalInput(src.expiresAt)}" /></div>
-          <div><label>备注</label><input name="note" value="${esc(src.note || "")}" /></div>
+          <div><label>有效期（到期时间，留空=永久有效）</label><input name="expiresAt" type="datetime-local" value="${toLocalInput(src.expiresAt)}" /></div>
+          <div style="flex:1"><label>备注</label><input name="note" value="${esc(src.note || "")}" /></div>
         </div>
       </form>`);
 
@@ -476,14 +480,38 @@
     state.cache.vms = vms;
     const chName = (id) => { const c = chs.find((c) => c.id === id); return c ? c.name : id; };
     const errCell = (e) => { e = e || "失败"; return `<span class="error-text" style="font-size:12px" title="${esc(e)}">${esc(e.slice(0, 36))}${e.length > 36 ? "…" : ""}</span>`; };
+    const sortMode = state.cache.modelSort || "priority";
+    const quotaOf = (c) => quotasList.find((x) => x.channelId === c.channelId && x.model === c.model);
+    // order returns a shallow-sorted copy (element refs preserved) honoring the
+    // current sort mode. "expiry" puts soonest-to-expire first; no-expiry last.
+    const order = (list) => {
+      const arr = (list || []).slice();
+      if (sortMode === "expiry") {
+        arr.sort((a, b) => {
+          const qa = quotaOf(a), qb = quotaOf(b);
+          const ta = qa && qa.expiresAt ? new Date(qa.expiresAt).getTime() : Infinity;
+          const tb = qb && qb.expiresAt ? new Date(qb.expiresAt).getTime() : Infinity;
+          if (ta !== tb) return ta - tb;
+          return a.priority - b.priority;
+        });
+      } else {
+        arr.sort((a, b) => a.priority - b.priority);
+      }
+      return arr;
+    };
 
     view.innerHTML = `
       <div class="page-head"><h2>模型路由</h2><button class="btn primary" id="add-model">+ 新建路由</button></div>
       <div class="muted" style="margin-bottom:12px">对外暴露的模型名按优先级依次尝试候选渠道；额度不足或上游失败时自动切换。轻测只探测接口连通性（不耗 token）；测速为真实小请求，按量结算额度。</div>
+      <div class="filter-row" style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
+        <span class="muted">候选排序：</span>
+        <button class="btn small ${sortMode === "priority" ? "primary" : ""}" data-sort="priority">按优先级</button>
+        <button class="btn small ${sortMode === "expiry" ? "primary" : ""}" data-sort="expiry">按有效期（即将到期优先）</button>
+      </div>
       ${vms.map((vm) => {
         const sp = vm.speedTest;
         const pr = vm.probe;
-        const cands = (vm.candidates || []).slice().sort((a, b) => a.priority - b.priority);
+        const cands = order(vm.candidates);
         return `
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center">
@@ -493,22 +521,23 @@
               ${pr ? `<span class="muted">· 轻测于 ${fmtTime(pr.at)}</span>` : ""}
               ${sp ? `<span class="muted">· 测速于 ${fmtTime(sp.at)}</span>` : ""}
             </div>
-            <div><button class="btn small" data-probe="${vm.id}" data-name="${esc(vm.name)}" title="GET /models 探测接口连通性，不消耗 token">轻测</button>
-            <button class="btn small" data-speedtest="${vm.id}" data-name="${esc(vm.name)}" title="真实小请求（max_tokens=8），按量结算额度">测速</button>
+            <div><button class="btn small primary" data-add-model="${vm.id}">+ 添加模型</button>
+            <button class="btn small" data-probe="${vm.id}" data-name="${esc(vm.name)}" title="GET /models 探测接口连通性，不消耗 token">${pr ? "重新轻测" : "轻测"}</button>
+            <button class="btn small" data-speedtest="${vm.id}" data-name="${esc(vm.name)}" title="真实小请求（max_tokens=8），按量结算额度">${sp ? "重新测速" : "测速"}</button>
             <button class="btn small" data-edit="${vm.id}">编辑</button>
             <button class="btn small danger" data-del="${vm.id}" data-name="${esc(vm.name)}">删除</button></div>
           </div>
-          <table style="margin-top:12px"><tr><th>优先级</th><th>状态</th><th>渠道</th><th>上游模型</th><th>额度</th><th>轻测 / 测速</th><th></th></tr>
-          ${cands.length === 0 ? '<tr><td colspan="7" class="muted">未配置候选渠道</td></tr>' :
+          <table style="margin-top:12px"><tr><th>优先级</th><th>状态</th><th>渠道</th><th>上游模型</th><th>额度</th><th>有效期</th><th>轻测 / 测速</th><th></th></tr>
+          ${cands.length === 0 ? '<tr><td colspan="8" class="muted">未配置候选渠道</td></tr>' :
             cands.map((c, i) => {
               const off = c.enabled === false;
-              const q = quotasList.find((x) => x.channelId === c.channelId && x.model === c.model);
+              const q = quotaOf(c);
               const spv = sp && sp.results && sp.results.find((x) => x.channelId === c.channelId && x.model === c.model);
               const prv = pr && pr.results && pr.results.find((x) => x.channelId === c.channelId && x.model === c.model);
               const parts = [];
               if (spv) {
                 parts.push(spv.ok
-                  ? `<b>${spv.latencyMs}</b> ms <span class="muted">${spv.tokens || 0}tk${spv.charge ? " · 扣" + fmt(spv.charge) : ""}</span>`
+                  ? `<b>${spv.latencyMs}</b> ms <span class="muted">${spv.charge ? "扣" + fmt(spv.charge) + "tk" : (spv.tokens || 0) + "tk"}</span>`
                   : errCell(spv.error));
               }
               if (prv) {
@@ -517,15 +546,19 @@
                   : errCell(prv.error));
               }
               const spCell = parts.length ? parts.join("<br>") : '<span class="muted">—</span>';
-              const qBad = q && q.status && q.status !== "ok";
+              const qBad = q && q.status && q.status !== "ok" && q.status !== "expired";
+              const qExpired = q && (isExpired(q.expiresAt) || q.status === "expired");
               return `<tr${off ? ' style="opacity:.55"' : ""}><td>${c.priority}</td>
                 <td>${off ? '<span class="badge bad">停用</span>' : '<span class="badge ok">启用</span>'}</td>
                 <td>${esc(chName(c.channelId))}</td><td>${esc(c.model)}</td>
-                <td>${q ? `${fmt(q.remaining)}（${q.mode === "calls" ? "按次" : "按token"}）${qBad ? " " + statusBadge(q) : ""}` : '<span class="badge bad">无额度配置</span>'}</td>
+                <td>${q ? `${fmt(q.remaining)}（${q.mode === "calls" ? "按次" : "按token"}）${(qBad || qExpired) ? " " + statusBadge(q) : ""}` : '<span class="badge bad">无额度配置</span>'}</td>
+                <td class="${q && isExpired(q.expiresAt) ? "red" : "muted"}" style="${q && isExpired(q.expiresAt) ? "color:var(--red)" : ""}">${q ? esc(fmtExpiry(q.expiresAt)) : "—"}</td>
                 <td>${spCell}</td>
                 <td class="actions">
+                  <button class="btn small" data-cand-edit="${vm.id}" data-cand-idx="${i}">编辑</button>
                   <button class="btn small" data-cand-toggle="${vm.id}" data-cand-idx="${i}" data-on="${!off}">${off ? "启用" : "停用"}</button>
                   ${qBad ? `<button class="btn small" data-resetst="${q.id}" title="手动恢复额度状态为正常">恢复</button>` : ""}
+                  <button class="btn small danger" data-cand-del="${vm.id}" data-cand-idx="${i}">删除</button>
                 </td></tr>`;
             }).join("")}
           </table>
@@ -533,8 +566,32 @@
       }).join("")}
     `;
 
-    $("#add-model").onclick = () => modelModal(null, chs);
-    view.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => modelModal(b.dataset.edit, chs)));
+    $("#add-model").onclick = () => modelModal(null);
+    view.querySelectorAll("[data-add-model]").forEach((b) => (b.onclick = () => {
+      const vm = vms.find((v) => v.id === b.dataset.addModel);
+      if (vm) batchAddModal(vm, chs);
+    }));
+    view.querySelectorAll("[data-sort]").forEach((b) => (b.onclick = () => {
+      state.cache.modelSort = b.dataset.sort; models(view);
+    }));
+    view.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => modelModal(b.dataset.edit)));
+    view.querySelectorAll("[data-cand-edit]").forEach((b) => (b.onclick = () => {
+      const vm = vms.find((v) => v.id === b.dataset.candEdit);
+      if (!vm) return;
+      const target = order(vm.candidates)[Number(b.dataset.candIdx)];
+      if (target) candidateModal(vm, target, chs);
+    }));
+    view.querySelectorAll("[data-cand-del]").forEach((b) => (b.onclick = async () => {
+      const vm = vms.find((v) => v.id === b.dataset.candDel);
+      if (!vm) return;
+      const target = order(vm.candidates)[Number(b.dataset.candIdx)];
+      if (!target) return;
+      if (!confirm(`从路由「${vm.name}」移除模型「${target.model}」？`)) return;
+      const cands = vm.candidates.filter((c) => c !== target);
+      await api(`/api/admin/virtual-models/${vm.id}`, { method: "PUT", body: JSON.stringify({ name: vm.name, description: vm.description, enabled: vm.enabled, candidates: cands }) });
+      state.cache.vms = null;
+      toast("已移除", "var(--red)"); models(view);
+    }));
     view.querySelectorAll("[data-probe]").forEach((b) => (b.onclick = async () => {
       const orig = b.textContent;
       b.disabled = true; b.textContent = "轻测中…";
@@ -564,8 +621,9 @@
     view.querySelectorAll("[data-cand-toggle]").forEach((b) => (b.onclick = async () => {
       const vm = vms.find((v) => v.id === b.dataset.candToggle);
       if (!vm) return;
-      const idx = Number(b.dataset.candIdx);
-      const cands = vm.candidates.map((c, i) => (i === idx ? { ...c, enabled: b.dataset.on !== "true" } : c));
+      const target = order(vm.candidates)[Number(b.dataset.candIdx)];
+      if (!target) return;
+      const cands = vm.candidates.map((c) => (c === target ? { ...c, enabled: b.dataset.on !== "true" } : c));
       await api(`/api/admin/virtual-models/${vm.id}`, { method: "PUT", body: JSON.stringify({ name: vm.name, description: vm.description, enabled: vm.enabled, candidates: cands }) });
       toast("已更新"); models(view);
     }));
@@ -580,7 +638,9 @@
     }));
   }
 
-  function modelModal(id, chs) {
+  // modelModal only edits route-level info (name / description / enabled).
+  // Candidate channels are managed via batchAddModal / candidateModal.
+  function modelModal(id) {
     const all = state.cache.vms || [];
     const src = all.find((v) => v.id === id) || { candidates: [] };
     const isEdit = !!id;
@@ -592,78 +652,86 @@
         </div>
         <label>状态</label>
         <select name="enabled"><option value="true" ${src.enabled !== false ? "selected" : ""}>启用</option><option value="false" ${src.enabled === false ? "selected" : ""}>停用</option></select>
-        <label style="margin-top:16px">候选渠道（优先级数字越小越先尝试，可拖动调整顺序）</label>
-        <div id="cand-rows"></div>
-        <button type="button" class="btn small" id="add-cand" style="margin-top:8px">+ 添加候选</button>
-        <div style="margin-top:14px;border:1px dashed var(--border);border-radius:8px;padding:10px 12px">
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <b style="font-size:13px">批量添加候选</b>
-            <select id="ba-channel" style="flex:1;min-width:140px">${chs.map((ch) => `<option value="${ch.id}">${esc(ch.name)}</option>`).join("")}</select>
-            <select id="ba-type" style="width:90px">
-              <option value="">全部类型</option>
-              ${MODEL_TYPES.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}
-            </select>
-            <button type="button" class="btn small" id="ba-load">加载该渠道模型</button>
-          </div>
-          <div id="ba-list" class="muted" style="margin-top:8px;font-size:13px">选择渠道后点击「加载该渠道模型」，勾选多个模型一次性加入候选。</div>
-          <button type="button" class="btn small primary" id="ba-add" style="margin-top:8px" disabled>加入候选（0）</button>
-        </div>
-      </form>`, { wide: true });
-
-    const rows = m.root.querySelector("#cand-rows");
-    let cands = (src.candidates || []).slice().sort((a, b) => a.priority - b.priority);
-
-    function renderRows() {
-      cands.sort((a, b) => a.priority - b.priority);
-      const quotas = state.cache.quotas || [];
-      const dls = chs.map((ch) => {
-        const ms = quotas.filter((q) => q.channelId === ch.id);
-        return `<datalist id="models-${ch.id}">${ms.map((q) => `<option value="${esc(q.model)}" label="剩 ${fmt(q.remaining)} · ${q.mode === "calls" ? "按次" : "按token"}"></option>`).join("")}</datalist>`;
-      }).join("");
-      rows.innerHTML = dls + cands.map((c, i) => `
-        <div style="display:flex;gap:8px;margin-top:8px;align-items:center;${c.enabled === false ? "opacity:.55" : ""}">
-          <select style="flex:2" data-c-channel="${i}">${chs.map((ch) => `<option value="${ch.id}" ${c.channelId === ch.id ? "selected" : ""}>${esc(ch.name)}</option>`).join("")}</select>
-          <input style="flex:2" data-c-model="${i}" list="models-${c.channelId}" value="${esc(c.model)}" placeholder="上游模型 ID（点击可下拉选择）" />
-          <input style="flex:1;width:70px" data-c-priority="${i}" type="number" value="${c.priority}" />
-          <span class="muted" style="font-size:12px">优先级</span>
-          <label class="muted" style="font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap"><input type="checkbox" data-c-enabled="${i}" ${c.enabled === false ? "" : "checked"} />启用</label>
-          <button type="button" class="btn small danger" data-c-del="${i}">×</button>
-        </div>`).join("");
-      rows.querySelectorAll("[data-c-del]").forEach((b) => (b.onclick = () => { cands.splice(Number(b.dataset.cDel), 1); renderRows(); }));
-      rows.querySelectorAll("[data-c-enabled]").forEach((s) => (s.onchange = () => {
-        const i = Number(s.dataset.cEnabled);
-        cands[i].enabled = s.checked;
-        renderRows();
-      }));
-      rows.querySelectorAll("[data-c-channel]").forEach((s) => (s.onchange = () => {
-        const i = Number(s.dataset.cChannel);
-        cands[i].channelId = s.value;
-        const inp = rows.querySelector(`[data-c-model="${i}"]`);
-        if (inp) inp.setAttribute("list", "models-" + s.value);
-      }));
-      rows.querySelectorAll("[data-c-model]").forEach((s) => (s.oninput = () => { cands[Number(s.dataset.cModel)].model = s.value; }));
-      rows.querySelectorAll("[data-c-priority]").forEach((s) => (s.oninput = () => { cands[Number(s.dataset.cPriority)].priority = Number(s.value) || 0; }));
-    }
-    renderRows();
-    m.root.querySelector("#add-cand").onclick = () => {
-      const nextP = cands.length ? Math.max(...cands.map((c) => c.priority)) + 1 : 1;
-      cands.push({ channelId: chs[0] ? chs[0].id : "", model: "", priority: nextP, enabled: true });
-      renderRows();
+        <div class="form-hint">${isEdit
+          ? "此对话框仅编辑路由信息；候选模型请使用工具栏的「+ 添加模型」或各模型行的「编辑」按钮。"
+          : "保存后可在工具栏点击「+ 添加模型」为该路由批量添加候选模型。"}</div>
+      </form>`);
+    m.root.querySelector("[data-submit]").onclick = async () => {
+      const f = new FormData($("#model-form"));
+      const req = { name: f.get("name"), description: f.get("description"), enabled: f.get("enabled") === "true", candidates: src.candidates || [] };
+      await api(isEdit ? `/api/admin/virtual-models/${id}` : "/api/admin/virtual-models", { method: isEdit ? "PUT" : "POST", body: JSON.stringify(req) });
+      state.cache.vms = null;
+      closeModal(); toast("已保存"); models(viewRef());
     };
+  }
 
-    // batch-add candidates: pick a channel, multi-select its models
+  // candidateModal edits a single candidate (channel + upstream model + priority + enabled).
+  function candidateModal(vm, cand, chs) {
+    if (!vm || !cand) return;
+    const quotas = state.cache.quotas || [];
+    const dl = (chId) => `<datalist id="cand-model-list">${quotas.filter((q) => q.channelId === chId).map((q) => `<option value="${esc(q.model)}" label="剩 ${fmt(q.remaining)} · ${q.mode === "calls" ? "按次" : "按token"}"></option>`).join("")}</datalist>`;
+    const m = openModal("编辑模型", `
+      <form id="cand-form">
+        <label>所属路由</label>
+        <input value="${esc(vm.name)}" disabled />
+        <label style="margin-top:12px">渠道</label>
+        <select name="channelId">${chs.map((ch) => `<option value="${ch.id}" ${cand.channelId === ch.id ? "selected" : ""}>${esc(ch.name)}</option>`).join("")}</select>
+        <label style="margin-top:12px">上游模型 ID</label>
+        <input name="model" value="${esc(cand.model)}" list="cand-model-list" placeholder="上游模型 ID（点击可下拉选择）" />
+        <div id="cand-dl">${dl(cand.channelId)}</div>
+        <label style="margin-top:12px">优先级（数字越小越先尝试）</label>
+        <input name="priority" type="number" value="${cand.priority}" />
+        <label style="margin-top:12px">状态</label>
+        <select name="enabled"><option value="true" ${cand.enabled !== false ? "selected" : ""}>启用</option><option value="false" ${cand.enabled === false ? "selected" : ""}>停用</option></select>
+      </form>`);
+    const sel = m.root.querySelector("[name=channelId]");
+    sel.onchange = () => { m.root.querySelector("#cand-dl").innerHTML = dl(sel.value); };
+    m.root.querySelector("[data-submit]").onclick = async () => {
+      const f = new FormData(m.root.querySelector("#cand-form"));
+      const model = String(f.get("model") || "").trim();
+      if (!model) return toast("请填写上游模型 ID", "var(--red)");
+      const updated = { channelId: f.get("channelId"), model, priority: Number(f.get("priority")) || 0, enabled: f.get("enabled") === "true" };
+      const cands = (vm.candidates || []).map((c) => (c === cand ? updated : c));
+      await api(`/api/admin/virtual-models/${vm.id}`, { method: "PUT", body: JSON.stringify({ name: vm.name, description: vm.description, enabled: vm.enabled, candidates: cands }) });
+      state.cache.vms = null;
+      closeModal(); toast("已保存"); models(viewRef());
+    };
+  }
+
+  // batchAddModal adds multiple models from a channel to the given route at once.
+  function batchAddModal(vm, chs) {
+    if (!vm) return;
+    const quotas = state.cache.quotas || [];
+    const m = openModal(`为路由「${vm.name}」添加模型`, `
+      <form id="ba-form">
+        <label>渠道</label>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select id="ba-channel" style="flex:1;min-width:140px">${chs.map((ch) => `<option value="${ch.id}">${esc(ch.name)}</option>`).join("")}</select>
+          <select id="ba-type" style="width:90px">
+            <option value="">全部类型</option>
+            ${MODEL_TYPES.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}
+          </select>
+          <button type="button" class="btn small" id="ba-load">加载该渠道模型</button>
+        </div>
+        <div id="ba-list" class="muted" style="margin-top:8px;font-size:13px">选择渠道后点击「加载该渠道模型」，勾选多个模型一次性加入候选。</div>
+      </form>`, {
+      wide: true,
+      actionsHTML: `<button class="btn" data-close>取消</button><button class="btn primary" id="ba-add" disabled>加入候选（0）</button>`,
+    });
+
     const baList = m.root.querySelector("#ba-list");
     const baAdd = m.root.querySelector("#ba-add");
     const baType = m.root.querySelector("#ba-type");
     const baChecked = new Set();
-    let baQuotas = []; // models loaded for the current channel
-    const syncBa = () => {
-      baAdd.disabled = baChecked.size === 0;
-      baAdd.textContent = `加入候选（${baChecked.size}）`;
-    };
+    let baQuotas = null; // null until "加载该渠道模型" is clicked
+    const syncBa = () => { baAdd.disabled = baChecked.size === 0; baAdd.textContent = `加入候选（${baChecked.size}）`; };
     const renderBaList = () => {
       const chId = m.root.querySelector("#ba-channel").value;
       const typeFilter = baType.value;
+      if (baQuotas === null) {
+        baList.innerHTML = '<div class="muted" style="padding:6px 0">点击「加载该渠道模型」以选择该渠道下已配置额度的模型。</div>';
+        return;
+      }
       const shown = typeFilter ? baQuotas.filter((q) => (q.type || "text") === typeFilter) : baQuotas;
       if (!baQuotas.length) {
         baList.innerHTML = '<div class="muted" style="padding:6px 0">该渠道暂无已配置额度的模型，可先到「额度管理」添加。</div>';
@@ -673,6 +741,7 @@
         baList.innerHTML = `<div class="muted" style="padding:6px 0">该渠道没有「${typeLabel(typeFilter)}」类型的模型。</div>`;
         return;
       }
+      const cands = vm.candidates || [];
       const rowsHtml = shown.map((q) => {
         const already = cands.some((c) => c.channelId === chId && c.model === q.model);
         return `<label class="ba-row${already ? " disabled" : ""}">
@@ -707,18 +776,19 @@
         syncBa();
       }));
     };
+    renderBaList();
     baType.onchange = renderBaList;
     m.root.querySelector("#ba-load").onclick = () => {
       const chId = m.root.querySelector("#ba-channel").value;
-      const quotas = (state.cache.quotas || []).filter((q) => q.channelId === chId);
       const modelsMap = new Map();
-      quotas.forEach((q) => { if (q.model && !modelsMap.has(q.model)) modelsMap.set(q.model, q); });
+      quotas.filter((q) => q.channelId === chId).forEach((q) => { if (q.model && !modelsMap.has(q.model)) modelsMap.set(q.model, q); });
       baQuotas = [...modelsMap.values()];
       baChecked.clear(); syncBa();
       renderBaList();
     };
-    baAdd.onclick = () => {
+    baAdd.onclick = async () => {
       const chId = m.root.querySelector("#ba-channel").value;
+      const cands = (vm.candidates || []).slice();
       let nextP = cands.length ? Math.max(...cands.map((c) => c.priority)) : 0;
       let added = 0;
       baChecked.forEach((model) => {
@@ -726,19 +796,10 @@
         cands.push({ channelId: chId, model, priority: ++nextP, enabled: true });
         added++;
       });
-      baChecked.clear(); syncBa();
-      renderRows();
-      toast(`已加入 ${added} 个候选`);
-    };
-
-    m.root.querySelector("[data-submit]").onclick = async () => {
-      const f = new FormData($("#model-form"));
-      const valid = cands.filter((c) => c.channelId && c.model);
-      if (!valid.length) return toast("请至少配置一个候选渠道", "var(--red)");
-      const req = { name: f.get("name"), description: f.get("description"), enabled: f.get("enabled") === "true", candidates: valid };
-      await api(isEdit ? `/api/admin/virtual-models/${id}` : "/api/admin/virtual-models", { method: isEdit ? "PUT" : "POST", body: JSON.stringify(req) });
+      if (!added) { toast("没有新增候选"); return; }
+      await api(`/api/admin/virtual-models/${vm.id}`, { method: "PUT", body: JSON.stringify({ name: vm.name, description: vm.description, enabled: vm.enabled, candidates: cands }) });
       state.cache.vms = null;
-      closeModal(); toast("已保存"); models(viewRef());
+      closeModal(); toast(`已加入 ${added} 个候选`); models(viewRef());
     };
   }
 
