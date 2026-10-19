@@ -17,7 +17,15 @@
 
   const fmt = (n) => {
     if (n === null || n === undefined) return "-";
-    if (typeof n === "number") return n.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
+    const v = Number(n) || 0;
+    if (v >= 100000000) return (v / 100000000).toFixed(2) + " 亿";
+    if (v >= 10000) return (v / 10000).toFixed(2) + " 万";
+    if (typeof n === "number" && Math.floor(v) === v) {
+      return v.toLocaleString("zh-CN");
+    }
+    if (typeof n === "number") {
+      return v.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
+    }
     return String(n);
   };
 
