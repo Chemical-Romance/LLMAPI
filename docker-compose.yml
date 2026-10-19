@@ -5,15 +5,25 @@ name: llm-api
 
 services:
   llm-router:
+    # 镜像由本地开发机 ./release.sh 构建并 push 到 GHCR，服务器只 pull 不编译；
+    # IMAGE_TAG 可指定 git 短 SHA 回滚（默认 latest）
+    image: ghcr.io/chemical-romance/llm-api:${IMAGE_TAG:-latest}
     build: .
     restart: unless-stopped
+    # 容器主机名 = Compose 服务名：同网络内的其它容器可通过 llm-router:8081 访问；
+    # 控制台「调用方法」会自动把 os.Hostname() 拼成内网 Base URL（如 http://llm-router:8081/v1）。
+    hostname: llm-router
     # 业务密钥/管理员密码来自 ./.env（该文件不提交到 Git）
     env_file:
       - ./.env
     environment:
       HTTP_ADDR: ':8081'
+      # 可选：显式覆盖控制台展示的 Base URL；留空则自动推导
+      # PUBLIC_BASE_URL: 'http://llm.snowbeasts.com'
+      # INTERNAL_BASE_URL: 'http://llm-router:8081'
     ports:
-      - '8081:8081'
+      # 只绑定回环地址，公网入口统一走宿主机 nginx(:80)
+      - '127.0.0.1:8081:8081'
     healthcheck:
       # /console/ 无需鉴权，200 视为健康
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:8081/console/ >/dev/null 2>&1']

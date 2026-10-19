@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # LLM-API 独立部署脚本（在 /usr/local/code/llm-api 下执行）
-# 功能：拉取最新代码 -> 重建 Docker 容器 -> 健康检查
+# 功能：拉取最新代码 -> 拉取 GHCR 预构建镜像 -> 启动容器 -> 健康检查
+#       （镜像在本地开发机 ./release.sh 构建并 push，本机零编译）
 #
 # 用法：
 #   ./deploy.sh
@@ -49,8 +50,38 @@ else
   echo "代码已是最新"
 fi
 
-echo "==> [2/4] 构建并启动 Docker 容器"
-docker compose up -d --build
+echo "==> [2/4] 拉取 GHCR 预构建镜像并启动容器（正常情况本机零编译）"
+# 镜像由本地开发机 ./release.sh 构建并 push 到 ghcr.io（本地编译，服务器只拉）。
+# 本机 2 vCPU / 3.6G，Go 编译虽不重但同样避免；网络不稳：最多重试 3 次。
+pull_images() {
+  if command -v ionice >/dev/null 2>&1; then
+    nice -n 19 ionice -c3 docker compose pull llm-router
+  else
+    docker compose pull llm-router
+  fi
+}
+pull_ok=0
+for i in 1 2 3; do
+  if pull_images; then pull_ok=1; break; fi
+  echo "[警告] 第 $i 次拉取镜像失败，3 秒后重试..."
+  sleep 3
+done
+
+if [ "$pull_ok" -ne 1 ]; then
+  if docker image inspect "$(docker compose config --images | grep llm-api)" >/dev/null 2>&1; then
+    echo "[警告] GHCR 拉取失败，回退使用本地已有旧镜像"
+    echo "        （若是 401/403，需先登录：docker login ghcr.io，用 GitHub PAT，权限 read:packages）"
+  else
+    echo "[警告] GHCR 拉取失败且本地无镜像，回退本地限流构建（较慢）"
+    if command -v ionice >/dev/null 2>&1; then
+      COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-1}" nice -n 19 ionice -c3 docker compose --parallel 1 up -d --build
+    else
+      COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-1}" docker compose --parallel 1 up -d --build
+    fi
+  fi
+fi
+# up -d 不带 --build：镜像已存在时直接起容器，不触发编译
+docker compose up -d
 
 echo "==> [3/4] 当前容器状态"
 docker compose ps
