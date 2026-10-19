@@ -167,8 +167,8 @@
   function topTable(rows) {
     rows = rows || [];
     if (!rows.length) return '<div class="muted">暂无数据</div>';
-    return `<table><tr><th>名称</th><th>请求</th><th>Token</th><th>消耗</th></tr>
-      ${rows.map((r) => `<tr><td>${esc(r.name)}</td><td>${fmt(r.count)}</td><td>${fmt(r.tokens)}</td><td>${fmt(r.charge)}</td></tr>`).join("")}</table>`;
+    return `<table><tr><th>名称</th><th>请求</th><th title="按次计费的调用次数，图片按张数计；按 token 计费的模型不计入">次数</th><th>Token</th><th>消耗</th></tr>
+      ${rows.map((r) => `<tr><td>${esc(r.name)}</td><td>${fmt(r.count)}</td><td>${r.calls ? fmt(r.calls) : '<span class="muted">—</span>'}</td><td>${fmt(r.tokens)}</td><td>${fmt(r.charge)}</td></tr>`).join("")}</table>`;
   }
 
   function lowQuotaTable(rows = []) {

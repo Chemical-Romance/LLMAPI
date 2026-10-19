@@ -112,11 +112,23 @@ func (a *Admin) groupStatus(ctx context.Context, since time.Time) []map[string]a
 
 // groupTop returns the top-N entries grouped by a field. field must be a full
 // aggregation field path such as "$channelName".
+// calls is the billed call count for calls-mode logs: 1 per chat call, one per
+// generated image for image requests, and 0 for token-mode logs.
 func (a *Admin) groupTop(ctx context.Context, field string, limit int) []map[string]any {
+	billedCalls := bson.M{"$cond": bson.A{
+		bson.M{"$eq": bson.A{"$mode", domain.ModeCalls}},
+		bson.M{"$cond": bson.A{
+			bson.M{"$eq": bson.A{"$endpoint", "/v1/images/generations"}},
+			bson.M{"$ifNull": bson.A{"$images", 0}},
+			1,
+		}},
+		0,
+	}}
 	pipeline := []bson.D{
 		{{Key: "$group", Value: bson.D{
 			{Key: "_id", Value: field},
 			{Key: "count", Value: bson.M{"$sum": 1}},
+			{Key: "calls", Value: bson.M{"$sum": billedCalls}},
 			{Key: "tokens", Value: bson.M{"$sum": "$totalTokens"}},
 			{Key: "charge", Value: bson.M{"$sum": "$charge"}},
 		}}},
@@ -126,6 +138,7 @@ func (a *Admin) groupTop(ctx context.Context, field string, limit int) []map[str
 	var rows []struct {
 		Name   string  `bson:"_id"`
 		Count  int64   `bson:"count"`
+		Calls  int64   `bson:"calls"`
 		Tokens int64   `bson:"tokens"`
 		Charge float64 `bson:"charge"`
 	}
@@ -138,7 +151,7 @@ func (a *Admin) groupTop(ctx context.Context, field string, limit int) []map[str
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, map[string]any{
-			"name": row.Name, "count": row.Count, "tokens": row.Tokens, "charge": row.Charge,
+			"name": row.Name, "count": row.Count, "calls": row.Calls, "tokens": row.Tokens, "charge": row.Charge,
 		})
 	}
 	return out
