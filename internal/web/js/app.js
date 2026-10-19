@@ -156,7 +156,8 @@
       <div class="card"><h3>低额度提醒</h3>${lowQuotaTable(s.lowQuotas)}</div>`;
   }
 
-  function topTable(rows = []) {
+  function topTable(rows) {
+    rows = rows || [];
     if (!rows.length) return '<div class="muted">暂无数据</div>';
     return `<table><tr><th>名称</th><th>请求</th><th>Token</th><th>消耗</th></tr>
       ${rows.map((r) => `<tr><td>${esc(r.name)}</td><td>${fmt(r.count)}</td><td>${fmt(r.tokens)}</td><td>${fmt(r.charge)}</td></tr>`).join("")}</table>`;
@@ -855,15 +856,25 @@
 
   /* ---------- users ---------- */
   async function users(view) {
-    const [us, toks] = await Promise.all([api("/api/admin/users"), api("/api/admin/tokens")]);
-    const origin = location.origin;
+    const [us, toks, info] = await Promise.all([
+      api("/api/admin/users"),
+      api("/api/admin/tokens"),
+      api("/api/admin/server-info").catch(() => ({})),
+    ]);
+    // 公网地址优先用后端推导值（含 nginx 转发的协议/域名），内网地址为容器间可解析的地址
+    const stripSlash = (s) => String(s || "").replace(/\/+$/, "");
+    const publicOrigin = stripSlash(info.publicUrl) || stripSlash(location.origin);
+    const internalOrigin = stripSlash(info.internalUrl);
+    const origin = publicOrigin;
+    const hasInternal = internalOrigin && internalOrigin !== publicOrigin;
     view.innerHTML = `
       <div class="page-head"><h2>用户与令牌</h2><button class="btn primary" id="add-user">+ 新建用户</button></div>
       <details class="card help">
         <summary>调用方法（OpenAI 兼容接口）</summary>
         <div class="help-body">
           <ul>
-            <li><b>Base URL</b>：<code>${esc(origin)}/v1</code></li>
+            <li><b>Base URL（公网）</b>：<code>${esc(publicOrigin)}/v1</code></li>
+            ${hasInternal ? `<li><b>Base URL（内网）</b>：<code>${esc(internalOrigin)}/v1</code>（同一内网 / Docker 网络内使用）</li>` : ""}
             <li><b>鉴权</b>：请求头 <code>Authorization: Bearer sk-xxx</code>，sk-xxx 为创建令牌时展示的密钥（仅显示一次，请妥善保存）</li>
             <li><b>模型名</b>：填「模型路由」页配置的对外模型名；调用 <code>GET /v1/models</code> 可列出全部可用模型</li>
             <li><b>接口</b>：<code>POST /v1/chat/completions</code>（对话）、<code>POST /v1/images/generations</code>（图片）</li>
@@ -886,6 +897,7 @@ resp = client.chat.completions.create(
     messages=[{"role": "user", "content": "你好"}],
 )
 print(resp.choices[0].message.content)</pre>
+          ${hasInternal ? `<div class="form-hint">内网调用时，把上面示例中的 <code>${esc(publicOrigin)}</code> 换成 <code>${esc(internalOrigin)}</code> 即可。</div>` : ""}
         </div>
       </details>
       ${us.map((u) => `

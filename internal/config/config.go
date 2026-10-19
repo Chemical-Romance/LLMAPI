@@ -17,6 +17,12 @@ type Config struct {
 	AdminPass string  // empty means auto-generate
 	LogQuota  float64 // default reserved tokens per request when max_tokens is unknown
 	CoolSec   int     // failover cooldown seconds after an upstream failure
+
+	// Optional overrides for the Base URLs shown on the console. When empty
+	// they are derived at runtime (public: from the incoming request; internal:
+	// from the container hostname and HTTPAddr).
+	PublicBaseURL   string
+	InternalBaseURL string
 }
 
 func Get() *Config {
@@ -28,8 +34,42 @@ func Get() *Config {
 		AdminPass: os.Getenv("ADMIN_PASSWORD"),
 		LogQuota:  envFloat("DEFAULT_RESERVE_TOKENS", 2048),
 		CoolSec:   envInt("FAILOVER_COOLDOWN_SEC", 60),
+
+		PublicBaseURL:   strings.TrimRight(envOr("PUBLIC_BASE_URL", ""), "/"),
+		InternalBaseURL: strings.TrimRight(envOr("INTERNAL_BASE_URL", ""), "/"),
 	}
 	return c
+}
+
+// PublicURL returns the configured externally reachable base URL, or "" when it
+// should be derived from the incoming request origin.
+func (c *Config) PublicURL() string { return c.PublicBaseURL }
+
+// InternalURL derives the base URL sibling containers use to reach this
+// service, e.g. http://llm-router:8081. The host comes from the container
+// hostname (the Compose service name, see docker-compose.yml) and the port from
+// HTTPAddr; INTERNAL_BASE_URL overrides the whole value.
+func (c *Config) InternalURL() string {
+	if c.InternalBaseURL != "" {
+		return c.InternalBaseURL
+	}
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		return ""
+	}
+	if p := listenPort(c.HTTPAddr); p != "" {
+		host += ":" + p
+	}
+	return "http://" + host
+}
+
+// listenPort extracts the numeric port from an address such as ":8081",
+// "0.0.0.0:8081" or "8081".
+func listenPort(addr string) string {
+	if i := strings.LastIndex(addr, ":"); i >= 0 {
+		addr = addr[i+1:]
+	}
+	return strings.TrimSpace(addr)
 }
 
 // DefaultReserveTokens returns the tokens reserved per chat request when the

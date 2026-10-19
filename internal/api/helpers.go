@@ -78,6 +78,24 @@ func verifyAdminToken(secret, token string) (bool, error) {
 	return true, nil
 }
 
+// requestBaseURL reconstructs the externally visible origin (scheme://host)
+// from a request, honouring the reverse proxy's X-Forwarded-Proto header. It is
+// used to show the public Base URL on the console without hard-coding a domain.
+func requestBaseURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if p := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); p != "" {
+		scheme = p
+	}
+	host := strings.TrimSpace(r.Host)
+	if host == "" {
+		return ""
+	}
+	return scheme + "://" + host
+}
+
 // bearerToken extracts the Bearer token from the Authorization header.
 func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")

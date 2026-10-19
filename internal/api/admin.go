@@ -173,6 +173,7 @@ func (a *Admin) Register(mux *http.ServeMux) {
 	protect := func(h http.HandlerFunc) http.HandlerFunc { return requireAdmin(a.auth.secret, h) }
 
 	mux.HandleFunc("GET /api/admin/me", protect(a.handleMe))
+	mux.HandleFunc("GET /api/admin/server-info", protect(a.handleServerInfo))
 
 	mux.HandleFunc("GET /api/admin/channels", protect(a.handleListChannels))
 	mux.HandleFunc("POST /api/admin/channels", protect(a.handleCreateChannel))
@@ -265,6 +266,21 @@ func (a *Admin) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (a *Admin) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"username": "admin", "ok": true})
+}
+
+// handleServerInfo reports the Base URLs clients can use to reach the API:
+// the public origin (as the browser reached the console) and the in-network
+// address sibling containers resolve, e.g. http://llm-router:8081. Both may be
+// overridden via PUBLIC_BASE_URL / INTERNAL_BASE_URL.
+func (a *Admin) handleServerInfo(w http.ResponseWriter, r *http.Request) {
+	public := a.gw.cfg.PublicURL()
+	if public == "" {
+		public = requestBaseURL(r)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"publicUrl":   strings.TrimRight(public, "/"),
+		"internalUrl": strings.TrimRight(a.gw.cfg.InternalURL(), "/"),
+	})
 }
 
 // ---------- channels ----------

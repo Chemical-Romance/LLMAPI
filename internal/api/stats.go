@@ -18,12 +18,12 @@ func (a *Admin) handleStats(w http.ResponseWriter, r *http.Request) {
 	startToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 
 	type agg struct {
-		Requests int64   `bson:"requests"`
-		Tokens   int64   `bson:"tokens"`
-		Images   int64   `bson:"images"`
-		Charge   float64 `bson:"charge"`
-		Success  int64   `bson:"success"`
-		Errors   int64   `bson:"errors"`
+		Requests int64   `bson:"requests" json:"requests"`
+		Tokens   int64   `bson:"tokens" json:"tokens"`
+		Images   int64   `bson:"images" json:"images"`
+		Charge   float64 `bson:"charge" json:"charge"`
+		Success  int64   `bson:"success" json:"success"`
+		Errors   int64   `bson:"errors" json:"errors"`
 	}
 
 	aggregate := func(match bson.M) agg {
@@ -110,11 +110,12 @@ func (a *Admin) groupStatus(ctx context.Context, since time.Time) []map[string]a
 	return out
 }
 
-// groupTop returns the top-N entries grouped by a field.
+// groupTop returns the top-N entries grouped by a field. field must be a full
+// aggregation field path such as "$channelName".
 func (a *Admin) groupTop(ctx context.Context, field string, limit int) []map[string]any {
 	pipeline := []bson.D{
 		{{Key: "$group", Value: bson.D{
-			{Key: "_id", Value: "$" + field},
+			{Key: "_id", Value: field},
 			{Key: "count", Value: bson.M{"$sum": 1}},
 			{Key: "tokens", Value: bson.M{"$sum": "$totalTokens"}},
 			{Key: "charge", Value: bson.M{"$sum": "$charge"}},
@@ -130,7 +131,7 @@ func (a *Admin) groupTop(ctx context.Context, field string, limit int) []map[str
 	}
 	cur, err := a.st.DB.RequestLogs.Aggregate(ctx, pipeline)
 	if err != nil {
-		return nil
+		return []map[string]any{}
 	}
 	defer cur.Close(ctx)
 	cur.All(ctx, &rows)
