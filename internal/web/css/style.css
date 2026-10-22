@@ -46,22 +46,23 @@ a { color: var(--accent); text-decoration: none; }
 .login-card .error-text { color: var(--red); margin-top: 12px; font-size: 13px; }
 
 /* ---------- layout ---------- */
-#main-view { display: flex; min-height: 100vh; }
-.sidebar {
-  width: 210px; background: var(--bg2); border-right: 1px solid var(--border);
-  display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh;
+#main-view { display: flex; flex-direction: column; min-height: 100vh; }
+.topbar {
+  width: 100%; background: var(--bg2); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 20px; padding: 0 20px; height: 56px;
+  position: sticky; top: 0; z-index: 20;
 }
-.sidebar .brand {
-  padding: 20px 18px; font-weight: 700; font-size: 17px; color: var(--accent);
-  border-bottom: 1px solid var(--border);
+.topbar .brand {
+  font-weight: 700; font-size: 17px; color: var(--accent); white-space: nowrap;
 }
-.sidebar nav { flex: 1; padding: 12px 0; }
-.sidebar nav a {
-  display: block; padding: 11px 20px; color: var(--muted); border-left: 3px solid transparent;
+.topbar nav { flex: 1; display: flex; align-items: center; height: 100%; overflow-x: auto; }
+.topbar nav a {
+  display: flex; align-items: center; height: 100%; padding: 0 16px;
+  color: var(--muted); border-bottom: 3px solid transparent; white-space: nowrap;
 }
-.sidebar nav a:hover { color: var(--text); background: var(--bg3); }
-.sidebar nav a.active { color: var(--accent); border-left-color: var(--accent); background: var(--bg3); }
-.sidebar-foot { padding: 16px; border-top: 1px solid var(--border); }
+.topbar nav a:hover { color: var(--text); background: var(--bg3); }
+.topbar nav a.active { color: var(--accent); border-bottom-color: var(--accent); background: var(--bg3); }
+.topbar-foot { display: flex; align-items: center; }
 .content { flex: 1; min-width: 0; padding: 26px 30px; }
 
 /* ---------- common ---------- */

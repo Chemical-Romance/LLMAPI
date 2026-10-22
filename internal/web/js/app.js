@@ -131,7 +131,7 @@
     const h = location.hash.replace(/^#\//, "") || "dashboard";
     const name = routes[h] ? h : "dashboard";
     state.route = name;
-    $$(".sidebar nav a").forEach((a) => a.classList.toggle("active", a.dataset.route === name));
+    $$(".topbar nav a").forEach((a) => a.classList.toggle("active", a.dataset.route === name));
     const view = $("#view");
     view.innerHTML = '<div class="muted">加载中…</div>';
     routes[name](view);
@@ -152,6 +152,8 @@
         <div class="stat"><div class="label">累计 Token</div><div class="value">${fmt(all.tokens)}</div></div>
       </div>
       <div class="grid stat-grid" style="margin-bottom:18px">
+        <div class="stat"><div class="label">剩余有效 Token</div><div class="value" style="color:var(--accent)">${fmt(s.remainTokens)}</div></div>
+        <div class="stat"><div class="label">剩余有效次数</div><div class="value" style="color:var(--accent)">${fmt(s.remainCalls)}</div></div>
         <div class="stat"><div class="label">渠道数</div><div class="value">${fmt(s.channelCount)}</div></div>
         <div class="stat"><div class="label">模型路由</div><div class="value">${fmt(s.virtualModelCount)}</div></div>
         <div class="stat"><div class="label">额度配置</div><div class="value">${fmt(s.quotaCount)}</div></div>
@@ -167,8 +169,9 @@
   function topTable(rows) {
     rows = rows || [];
     if (!rows.length) return '<div class="muted">暂无数据</div>';
-    return `<table><tr><th>名称</th><th>请求</th><th title="按次计费的调用次数，图片按张数计；按 token 计费的模型不计入">次数</th><th>Token</th><th>消耗</th></tr>
-      ${rows.map((r) => `<tr><td>${esc(r.name)}</td><td>${fmt(r.count)}</td><td>${r.calls ? fmt(r.calls) : '<span class="muted">—</span>'}</td><td>${fmt(r.tokens)}</td><td>${fmt(r.charge)}</td></tr>`).join("")}</table>`;
+    const cell = (v) => (v ? fmt(v) : '<span class="muted">—</span>');
+    return `<table><tr><th>名称</th><th>请求</th><th title="按次计费的调用次数，图片按张数计；按 token 计费的模型不计入">次数</th><th>Token</th><th title="按 token 模式消耗的额度（乘以系数后）">消耗(tok)</th><th title="按次模式消耗的额度（次数 × 单次/张消耗）">消耗(次)</th><th>消耗合计</th></tr>
+      ${rows.map((r) => `<tr><td>${esc(r.name)}</td><td>${fmt(r.count)}</td><td>${cell(r.calls)}</td><td>${fmt(r.tokens)}</td><td>${cell(r.chargeTokens)}</td><td>${cell(r.chargeCalls)}</td><td>${fmt(r.charge)}</td></tr>`).join("")}</table>`;
   }
 
   function lowQuotaTable(rows = []) {

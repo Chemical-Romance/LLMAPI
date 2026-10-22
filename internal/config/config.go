@@ -23,6 +23,10 @@ type Config struct {
 	// from the container hostname and HTTPAddr).
 	PublicBaseURL   string
 	InternalBaseURL string
+
+	// FrameAncestors is the CSP frame-ancestors allowlist for the admin
+	// console, so it can only be embedded by trusted parent origins.
+	FrameAncestors string
 }
 
 func Get() *Config {
@@ -37,6 +41,8 @@ func Get() *Config {
 
 		PublicBaseURL:   strings.TrimRight(envOr("PUBLIC_BASE_URL", ""), "/"),
 		InternalBaseURL: strings.TrimRight(envOr("INTERNAL_BASE_URL", ""), "/"),
+
+		FrameAncestors: envOr("FRAME_ANCESTORS", "https://saas.snowbeasts.com"),
 	}
 	return c
 }

@@ -15,8 +15,9 @@ var assets embed.FS
 
 // Handler serves the embedded admin console. The caller mounts it under
 // /console. Client-side SPA routes (paths without a dot) fall back to
-// index.html so the UI can deep-link.
-func Handler() http.Handler {
+// index.html so the UI can deep-link. frameAncestors is the CSP allowlist of
+// origins permitted to embed the console; empty disables the header.
+func Handler(frameAncestors string) http.Handler {
 	sub, err := fs.Sub(assets, ".")
 	if err != nil {
 		panic(err)
@@ -36,6 +37,9 @@ func Handler() http.Handler {
 		}
 		r.URL.Path = p
 		w.Header().Set("Cache-Control", "no-cache")
+		if frameAncestors != "" {
+			w.Header().Set("Content-Security-Policy", "frame-ancestors "+frameAncestors)
+		}
 		fileServer.ServeHTTP(w, r)
 	})
 }

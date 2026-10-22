@@ -54,9 +54,9 @@ func main() {
 	adm := api.NewAdmin(st, adminAuth, gw)
 
 	mux := http.NewServeMux()
-	adm.Register(mux)                      // /api/admin/*
-	gw.Register(mux)                       // /v1/*
-	mux.Handle("/console/", web.Handler()) // admin console (embedded SPA)
+	adm.Register(mux)                                        // /api/admin/*
+	gw.Register(mux)                                         // /v1/*
+	mux.Handle("/console/", web.Handler(cfg.FrameAncestors)) // admin console (embedded SPA)
 	mux.Handle("/", http.RedirectHandler("/console/", http.StatusMovedPermanently))
 
 	// No WriteTimeout: SSE responses must be allowed to stream indefinitely.
