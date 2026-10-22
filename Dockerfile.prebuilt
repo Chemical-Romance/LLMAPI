@@ -1,0 +1,13 @@
+# llm-api 预编译二进制用 Dockerfile（本地交叉编译后传输到服务器使用）
+FROM alpine:3.20
+
+# 国内服务器访问官方 CDN 可能被拒，改用阿里云镜像源
+RUN sed -i 's#dl-cdn.alpinelinux.org#mirrors.aliyun.com#g' /etc/apk/repositories \
+    && apk add --no-cache ca-certificates wget tzdata
+
+# 本地交叉编译出的 linux/amd64 二进制，传到服务器时需和本文件放在同一目录
+COPY llm-api /usr/local/bin/server
+RUN chmod +x /usr/local/bin/server
+
+EXPOSE 8081
+CMD ["server"]

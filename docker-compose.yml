@@ -5,10 +5,11 @@ name: llm-api
 
 services:
   llm-router:
-    # 镜像由本地开发机 ./release.sh 构建并 push 到 GHCR，服务器只 pull 不编译；
-    # IMAGE_TAG 可指定 git 短 SHA 回滚（默认 latest）
-    image: ghcr.io/chemical-romance/llm-api:${IMAGE_TAG:-latest}
-    build: .
+    # 预编译产物方式：本地交叉编译 llm-api 二进制后传到服务器，用 Dockerfile.prebuilt 构建
+    image: llm-api:prebuilt
+    build:
+      context: .
+      dockerfile: Dockerfile.prebuilt
     restart: unless-stopped
     # 容器主机名 = Compose 服务名：同网络内的其它容器可通过 llm-router:8081 访问；
     # 控制台「调用方法」会自动把 os.Hostname() 拼成内网 Base URL（如 http://llm-router:8081/v1）。

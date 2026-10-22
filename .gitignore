@@ -29,3 +29,6 @@ go.work.sum
 .idea/
 .vscode/
 .DS_Store
+
+# 本地发布配置（含服务器地址/密码，勿提交）
+.release.env
