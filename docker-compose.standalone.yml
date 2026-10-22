@@ -1,0 +1,44 @@
+# 独立部署编排：新服务器一条命令拉起 app + MongoDB，不依赖 skillbook。
+# 用法：./deploy-standalone.sh   （或 docker compose -f docker-compose.standalone.yml up -d --build）
+name: llm-api
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  llm-router:
+    image: llm-api:standalone
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    hostname: llm-router
+    env_file:
+      - ./.env
+    environment:
+      HTTP_ADDR: ':8081'
+      MONGO_URI: 'mongodb://mongo:27017'
+    ports:
+      # 无 nginx：直接对外暴露 8081（请用防火墙限制来源，或后续再加 TLS 反代）
+      - '8081:8081'
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:8081/console/ >/dev/null 2>&1']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mongo-data:
