@@ -11,7 +11,7 @@ import (
 )
 
 // handleStats returns dashboard aggregates: today + all-time usage, status
-// breakdown, top channels/models and low quotas.
+// breakdown, top channels/models, quota remaining totals and low quotas.
 func (a *Admin) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := time.Now().UTC()
@@ -57,7 +57,12 @@ func (a *Admin) handleStats(w http.ResponseWriter, r *http.Request) {
 	statusStats := a.groupStatus(ctx, startToday)
 	topChannels := a.groupTop(ctx, "$channelName", 8)
 	topModels := a.groupTop(ctx, "$virtualModel", 8)
-	lowQuotas := a.lowQuotas(ctx)
+
+	quotas, quotaErr := a.st.ListQuotas(ctx, bson.M{})
+	if quotaErr != nil {
+		quotas = nil
+	}
+	lowQuotas, remainTokens, remainCalls := quotaSummary(quotas)
 
 	channelCount, _ := a.st.DB.Channels.CountDocuments(ctx, bson.M{})
 	vmCount, _ := a.st.DB.VirtualModels.CountDocuments(ctx, bson.M{})
@@ -71,6 +76,8 @@ func (a *Admin) handleStats(w http.ResponseWriter, r *http.Request) {
 		"topChannels":       topChannels,
 		"topModels":         topModels,
 		"lowQuotas":         lowQuotas,
+		"remainTokens":      remainTokens,
+		"remainCalls":       remainCalls,
 		"channelCount":      channelCount,
 		"virtualModelCount": vmCount,
 		"quotaCount":        quotaCount,
@@ -114,9 +121,12 @@ func (a *Admin) groupStatus(ctx context.Context, since time.Time) []map[string]a
 // aggregation field path such as "$channelName".
 // calls is the billed call count for calls-mode logs: 1 per chat call, one per
 // generated image for image requests, and 0 for token-mode logs.
+// charge is split by mode: chargeTokens for token-mode consumption and
+// chargeCalls for calls-mode consumption.
 func (a *Admin) groupTop(ctx context.Context, field string, limit int) []map[string]any {
+	isCalls := bson.M{"$eq": bson.A{"$mode", domain.ModeCalls}}
 	billedCalls := bson.M{"$cond": bson.A{
-		bson.M{"$eq": bson.A{"$mode", domain.ModeCalls}},
+		isCalls,
 		bson.M{"$cond": bson.A{
 			bson.M{"$eq": bson.A{"$endpoint", "/v1/images/generations"}},
 			bson.M{"$ifNull": bson.A{"$images", 0}},
@@ -124,6 +134,8 @@ func (a *Admin) groupTop(ctx context.Context, field string, limit int) []map[str
 		}},
 		0,
 	}}
+	chargeTokens := bson.M{"$cond": bson.A{isCalls, 0, "$charge"}}
+	chargeCalls := bson.M{"$cond": bson.A{isCalls, "$charge", 0}}
 	pipeline := []bson.D{
 		{{Key: "$group", Value: bson.D{
 			{Key: "_id", Value: field},
@@ -131,16 +143,20 @@ func (a *Admin) groupTop(ctx context.Context, field string, limit int) []map[str
 			{Key: "calls", Value: bson.M{"$sum": billedCalls}},
 			{Key: "tokens", Value: bson.M{"$sum": "$totalTokens"}},
 			{Key: "charge", Value: bson.M{"$sum": "$charge"}},
+			{Key: "chargeTokens", Value: bson.M{"$sum": chargeTokens}},
+			{Key: "chargeCalls", Value: bson.M{"$sum": chargeCalls}},
 		}}},
 		{{Key: "$sort", Value: bson.M{"count": -1}}},
 		{{Key: "$limit", Value: limit}},
 	}
 	var rows []struct {
-		Name   string  `bson:"_id"`
-		Count  int64   `bson:"count"`
-		Calls  int64   `bson:"calls"`
-		Tokens int64   `bson:"tokens"`
-		Charge float64 `bson:"charge"`
+		Name         string  `bson:"_id"`
+		Count        int64   `bson:"count"`
+		Calls        int64   `bson:"calls"`
+		Tokens       int64   `bson:"tokens"`
+		Charge       float64 `bson:"charge"`
+		ChargeTokens float64 `bson:"chargeTokens"`
+		ChargeCalls  float64 `bson:"chargeCalls"`
 	}
 	cur, err := a.st.DB.RequestLogs.Aggregate(ctx, pipeline)
 	if err != nil {
@@ -152,27 +168,31 @@ func (a *Admin) groupTop(ctx context.Context, field string, limit int) []map[str
 	for _, row := range rows {
 		out = append(out, map[string]any{
 			"name": row.Name, "count": row.Count, "calls": row.Calls, "tokens": row.Tokens, "charge": row.Charge,
+			"chargeTokens": row.ChargeTokens, "chargeCalls": row.ChargeCalls,
 		})
 	}
 	return out
 }
 
-// lowQuotas flags quotas whose remaining is running low (tokens or calls).
-func (a *Admin) lowQuotas(ctx context.Context) []domain.Quota {
-	qs, err := a.st.ListQuotas(ctx, bson.M{})
-	if err != nil {
-		return nil
-	}
-	low := make([]domain.Quota, 0, len(qs))
+// quotaSummary returns the low-quota warnings plus the totals of remaining
+// tokens and remaining calls across all enabled, unexpired quotas.
+func quotaSummary(qs []domain.Quota) (low []domain.Quota, remainTokens, remainCalls float64) {
+	low = make([]domain.Quota, 0)
 	for _, q := range qs {
-		if !q.Enabled {
+		if !q.Enabled || q.IsExpired() {
 			continue
 		}
-		if q.Mode == domain.ModeToken && q.Remaining <= 5000 {
-			low = append(low, q)
-		} else if q.Mode == domain.ModeCalls && q.Remaining <= 20 {
+		if q.Mode == domain.ModeCalls {
+			remainCalls += q.Remaining
+			if q.Remaining <= 20 {
+				low = append(low, q)
+			}
+			continue
+		}
+		remainTokens += q.Remaining
+		if q.Remaining <= 5000 {
 			low = append(low, q)
 		}
 	}
-	return low
+	return low, remainTokens, remainCalls
 }
